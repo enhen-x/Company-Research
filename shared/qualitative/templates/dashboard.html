@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ company_name }} ({{ stock_code }}) · 商业质量评估</title>
+<meta name="description" content="{{ company_name }}（{{ stock_code }}）商业模式与护城河定性分析 — 6维度深度评估">
+<link rel="canonical" href="https://terancejiang.com/zh/stock/{{ slug }}.html">
+<meta property="og:title" content="{{ company_name }} ({{ stock_code }}) · 商业质量评估">
+<meta property="og:description" content="{{ company_name }}（{{ stock_code }}）商业模式与护城河定性分析">
+<meta property="og:type" content="article">
+<meta property="og:url" content="https://terancejiang.com/zh/stock/{{ slug }}.html">
+<link rel="preload" href="/assets/fonts/JetBrainsMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+{% if standalone_css %}
+<style>
+{{ standalone_css }}
+</style>
+{% else %}
+<link rel="stylesheet" href="/assets/css/style.css?v=2">
+<link rel="stylesheet" href="/assets/css/report.css?v=1">
+{% endif %}
+</head>
+<body>
+
+<div class="container">
+  <nav class="site-nav">
+    <a href="/" class="nav-logo">Terance Jiang</a>
+    <div class="nav-links">
+      <a href="/zh/stock/" class="active">个股研究</a>
+      <a href="/zh/essays/">投资随想</a>
+      <a href="/zh/sectors/">行业分析</a>
+      <a href="/zh/about.html">关于</a>
+    </div>
+  </nav>
+</div>
+
+<div class="report-body">
+
+<div class="header">
+  <div class="ticker">{{ exchange }} · {{ industry }} · {{ stock_code }}</div>
+  <h1>{{ company_name }} · 商业质量评估</h1>
+  <div class="date">Report generated {{ generated_date }} · Price ¥{{ current_price }} · Mkt Cap ¥{{ market_cap }}</div>
+</div>
+
+<!-- Verdict -->
+<div class="verdict {{ verdict_class }}">
+  <div>
+    <div class="verdict-label">Business Quality Verdict</div>
+    <div class="verdict-text">
+      <span class="tag {{ verdict_tag_class }}">{{ verdict_tag }}</span> &nbsp;
+      {{ verdict_text }}
+    </div>
+  </div>
+</div>
+
+<!-- KPI Snapshot -->
+<h2>Quality Snapshot</h2>
+
+<div class="grid g4">
+  {% for card in kpi_cards[:4] %}
+  <div class="metric {{ card.css_class }}">
+    <div class="label">{{ card.label }}</div>
+    <div class="value">{{ card.value }}</div>
+    {% if card.sub %}<div class="sub">{{ card.sub }}</div>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+{% if kpi_cards|length > 4 %}
+<div class="grid g4">
+  {% for card in kpi_cards[4:8] %}
+  <div class="metric {{ card.css_class }}">
+    <div class="label">{{ card.label }}</div>
+    <div class="value">{{ card.value }}</div>
+    {% if card.sub %}<div class="sub">{{ card.sub }}</div>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
+
+<!-- Executive Summary -->
+{% if executive_summary %}
+<h2>Executive Summary</h2>
+<div class="callout">
+  {{ executive_summary }}
+</div>
+{% endif %}
+
+<!-- Dimension Sections -->
+{% for dim in dimensions %}
+<h2>{{ dim.title }}{% if dim.badge %} &nbsp;<span class="tag {{ dim.badge_class }}">{{ dim.badge }}</span>{% endif %}</h2>
+{{ dim.content }}
+{% endfor %}
+
+<!-- Conclusion -->
+{% if conclusion %}
+<h2>总结与投资启示</h2>
+{{ conclusion }}
+{% endif %}
+
+<!-- Structured Parameters -->
+{% if parameters_table %}
+<details>
+  <summary>Structured Parameters · 结构化参数表</summary>
+  <div class="details-content">
+    {{ parameters_table }}
+  </div>
+</details>
+{% endif %}
+
+<!-- Framework Guide Appendix -->
+{% if framework_guide %}
+<details>
+  <summary>Appendix · 分析框架与评级标准说明</summary>
+  <div class="details-content">
+    {{ framework_guide }}
+  </div>
+</details>
+{% endif %}
+
+<div class="footer">
+  <strong>Disclaimer:</strong> 本报告基于公开数据的结构化分析，不构成投资建议。分析框架参考 Greenwald 竞争优势理论与传统护城河分析方法。<br>
+  Generated with 通用定性分析模块 v2.0 · {{ generated_date }}
+</div>
+
+</div><!-- /report-body -->
+
+</body>
+</html>

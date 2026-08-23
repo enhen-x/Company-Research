@@ -1,0 +1,43 @@
+[
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "现金及等价物", "ind_value": 29965000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "应收帐款", "ind_value": 60985000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "存货", "ind_value": 6511000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "流动资产合计", "ind_value": 152987000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "固定资产", "ind_value": 45680000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "无形资产", "ind_value": 0},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "总资产", "ind_value": 364980000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "应付帐款", "ind_value": 68960000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "短期贷款", "ind_value": 10912000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "流动负债合计", "ind_value": 176392000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "长期贷款", "ind_value": 96300000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "总负债", "ind_value": 290437000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "递延税项资产", "ind_value": 0},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "递延税项负债", "ind_value": 0},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "股东权益", "ind_value": 74543000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "少数股东权益", "ind_value": 0},
+
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "现金及等价物", "ind_value": 29965000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "总资产", "ind_value": 352583000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "短期贷款", "ind_value": 15807000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "长期贷款", "ind_value": 95281000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "总负债", "ind_value": 290437000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "股东权益", "ind_value": 62146000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "少数股东权益", "ind_value": 0},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "应收帐款", "ind_value": 60985000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "应付帐款", "ind_value": 62611000000},
+
+  {"ts_code": "AAPL", "end_date": "20220924", "ind_name": "现金及等价物", "ind_value": 23646000000},
+  {"ts_code": "AAPL", "end_date": "20220924", "ind_name": "总资产", "ind_value": 352755000000},
+  {"ts_code": "AAPL", "end_date": "20220924", "ind_name": "总负债", "ind_value": 302083000000},
+  {"ts_code": "AAPL", "end_date": "20220924", "ind_name": "股东权益", "ind_value": 50672000000},
+
+  {"ts_code": "AAPL", "end_date": "20210925", "ind_name": "现金及等价物", "ind_value": 34940000000},
+  {"ts_code": "AAPL", "end_date": "20210925", "ind_name": "总资产", "ind_value": 351002000000},
+  {"ts_code": "AAPL", "end_date": "20210925", "ind_name": "总负债", "ind_value": 287912000000},
+  {"ts_code": "AAPL", "end_date": "20210925", "ind_name": "股东权益", "ind_value": 63090000000},
+
+  {"ts_code": "AAPL", "end_date": "20200926", "ind_name": "现金及等价物", "ind_value": 38016000000},
+  {"ts_code": "AAPL", "end_date": "20200926", "ind_name": "总资产", "ind_value": 323888000000},
+  {"ts_code": "AAPL", "end_date": "20200926", "ind_name": "总负债", "ind_value": 258549000000},
+  {"ts_code": "AAPL", "end_date": "20200926", "ind_name": "股东权益", "ind_value": 65339000000}
+]

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "tushare": {
+      "source": "waditu-tushare/skills",
+      "sourceType": "github",
+      "computedHash": "fed6ececc8601255dc7132c0130ba6c882e1ce892a72ef60e13de59ef9fa450d"
+    }
+  }
+}

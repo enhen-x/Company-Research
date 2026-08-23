@@ -1,0 +1,72 @@
+[
+  {
+    "ts_code": "AAPL",
+    "end_date": "20240928",
+    "roe_avg": 160.58,
+    "gross_profit_ratio": 46.28,
+    "net_profit_ratio": 23.97,
+    "debt_asset_ratio": 79.59,
+    "pe_ttm": 32.5,
+    "pb_ttm": 48.2,
+    "operate_income_yoy": 2.02,
+    "holder_profit_yoy": -3.36,
+    "bps": 4.38,
+    "total_market_cap": 3850000
+  },
+  {
+    "ts_code": "AAPL",
+    "end_date": "20230930",
+    "roe_avg": 156.08,
+    "gross_profit_ratio": 44.13,
+    "net_profit_ratio": 25.31,
+    "debt_asset_ratio": 82.35,
+    "pe_ttm": 30.2,
+    "pb_ttm": 45.8,
+    "operate_income_yoy": -2.81,
+    "holder_profit_yoy": -2.81,
+    "bps": 3.95,
+    "total_market_cap": 3000000
+  },
+  {
+    "ts_code": "AAPL",
+    "end_date": "20220924",
+    "roe_avg": 196.96,
+    "gross_profit_ratio": 43.31,
+    "net_profit_ratio": 25.31,
+    "debt_asset_ratio": 85.64,
+    "pe_ttm": 22.5,
+    "pb_ttm": 38.2,
+    "operate_income_yoy": 7.78,
+    "holder_profit_yoy": 5.41,
+    "bps": 3.18,
+    "total_market_cap": 2100000
+  },
+  {
+    "ts_code": "AAPL",
+    "end_date": "20210925",
+    "roe_avg": 150.07,
+    "gross_profit_ratio": 41.78,
+    "net_profit_ratio": 25.88,
+    "debt_asset_ratio": 82.02,
+    "pe_ttm": 28.8,
+    "pb_ttm": 42.5,
+    "operate_income_yoy": 64.92,
+    "holder_profit_yoy": 64.92,
+    "bps": 3.84,
+    "total_market_cap": 2900000
+  },
+  {
+    "ts_code": "AAPL",
+    "end_date": "20200926",
+    "roe_avg": 87.87,
+    "gross_profit_ratio": 38.23,
+    "net_profit_ratio": 20.91,
+    "debt_asset_ratio": 79.83,
+    "pe_ttm": 36.5,
+    "pb_ttm": 35.2,
+    "operate_income_yoy": 3.96,
+    "holder_profit_yoy": 3.91,
+    "bps": 3.98,
+    "total_market_cap": 2200000
+  }
+]

@@ -1,0 +1,15 @@
+[
+  {
+    "ts_code": "600887.SH",
+    "trade_date": "20241230",
+    "close": 27.50,
+    "pe_ttm": 18.65,
+    "pb": 3.82,
+    "total_mv": 17500000.00,
+    "circ_mv": 1720000.00,
+    "total_share": 636363.64,
+    "float_share": 625454.55,
+    "turnover_rate": 0.85,
+    "volume_ratio": 1.12
+  }
+]

@@ -1,0 +1,112 @@
+[
+  {
+    "ts_code": "600887.SH",
+    "trade_date": "20260306",
+    "close": 28.50,
+    "pe_ttm": 18.5,
+    "pb": 4.2,
+    "total_mv": 18200000,
+    "circ_mv": 17800000,
+    "dv_ttm": 3.80,
+    "turnover_rate": 0.85
+  },
+  {
+    "ts_code": "600519.SH",
+    "trade_date": "20260306",
+    "close": 1580.00,
+    "pe_ttm": 25.0,
+    "pb": 8.5,
+    "total_mv": 198500000,
+    "circ_mv": 198500000,
+    "dv_ttm": 2.50,
+    "turnover_rate": 0.35
+  },
+  {
+    "ts_code": "000858.SZ",
+    "trade_date": "20260306",
+    "close": 135.00,
+    "pe_ttm": 20.0,
+    "pb": 5.8,
+    "total_mv": 52400000,
+    "circ_mv": 52400000,
+    "dv_ttm": 3.10,
+    "turnover_rate": 0.55
+  },
+  {
+    "ts_code": "601398.SH",
+    "trade_date": "20260306",
+    "close": 6.20,
+    "pe_ttm": 5.5,
+    "pb": 0.65,
+    "total_mv": 221800000,
+    "circ_mv": 198000000,
+    "dv_ttm": 5.80,
+    "turnover_rate": 0.25
+  },
+  {
+    "ts_code": "300750.SZ",
+    "trade_date": "20260306",
+    "close": 210.00,
+    "pe_ttm": 35.0,
+    "pb": 6.5,
+    "total_mv": 92000000,
+    "circ_mv": 85000000,
+    "dv_ttm": 0.80,
+    "turnover_rate": 1.50
+  },
+  {
+    "ts_code": "000001.SZ",
+    "trade_date": "20260306",
+    "close": 12.80,
+    "pe_ttm": 6.0,
+    "pb": 0.72,
+    "total_mv": 24900000,
+    "circ_mv": 24000000,
+    "dv_ttm": 4.50,
+    "turnover_rate": 0.65
+  },
+  {
+    "ts_code": "600100.SH",
+    "trade_date": "20260306",
+    "close": 8.50,
+    "pe_ttm": null,
+    "pb": 1.8,
+    "total_mv": 2500000,
+    "circ_mv": 2200000,
+    "dv_ttm": 0.50,
+    "turnover_rate": 0.30
+  },
+  {
+    "ts_code": "688981.SH",
+    "trade_date": "20260306",
+    "close": 85.00,
+    "pe_ttm": 55.0,
+    "pb": 3.2,
+    "total_mv": 67000000,
+    "circ_mv": 15000000,
+    "dv_ttm": 0.20,
+    "turnover_rate": 2.00
+  },
+  {
+    "ts_code": "000666.SZ",
+    "trade_date": "20260306",
+    "close": 1.50,
+    "pe_ttm": null,
+    "pb": -0.30,
+    "total_mv": 300000,
+    "circ_mv": 280000,
+    "dv_ttm": 0.00,
+    "turnover_rate": 0.05
+  },
+  {
+    "ts_code": "301234.SZ",
+    "trade_date": "20260306",
+    "close": 35.00,
+    "pe_ttm": 42.0,
+    "pb": 5.0,
+    "total_mv": 1500000,
+    "circ_mv": 400000,
+    "dv_ttm": 0.00,
+    "turnover_rate": 3.50
+  }
+]

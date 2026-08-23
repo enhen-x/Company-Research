@@ -1,0 +1,20 @@
+[
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20250228",
+    "pledge_count": 15,
+    "unrest_pledge": 280000000.00,
+    "rest_pledge": 50000000.00,
+    "total_share": 6363636400.00,
+    "pledge_ratio": 5.19
+  },
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20250131",
+    "pledge_count": 14,
+    "unrest_pledge": 275000000.00,
+    "rest_pledge": 48000000.00,
+    "total_share": 6363636400.00,
+    "pledge_ratio": 5.08
+  }
+]

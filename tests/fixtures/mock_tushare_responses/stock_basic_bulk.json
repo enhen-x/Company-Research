@@ -1,0 +1,82 @@
+[
+  {
+    "ts_code": "600887.SH",
+    "name": "伊利股份",
+    "industry": "食品饮料",
+    "area": "内蒙古",
+    "market": "主板",
+    "list_date": "19960312"
+  },
+  {
+    "ts_code": "600519.SH",
+    "name": "贵州茅台",
+    "industry": "食品饮料",
+    "area": "贵州",
+    "market": "主板",
+    "list_date": "20010827"
+  },
+  {
+    "ts_code": "000858.SZ",
+    "name": "五粮液",
+    "industry": "食品饮料",
+    "area": "四川",
+    "market": "主板",
+    "list_date": "19980427"
+  },
+  {
+    "ts_code": "601398.SH",
+    "name": "工商银行",
+    "industry": "银行",
+    "area": "北京",
+    "market": "主板",
+    "list_date": "20061027"
+  },
+  {
+    "ts_code": "300750.SZ",
+    "name": "宁德时代",
+    "industry": "电气设备",
+    "area": "福建",
+    "market": "创业板",
+    "list_date": "20180611"
+  },
+  {
+    "ts_code": "000001.SZ",
+    "name": "平安银行",
+    "industry": "银行",
+    "area": "广东",
+    "market": "主板",
+    "list_date": "19910403"
+  },
+  {
+    "ts_code": "600100.SH",
+    "name": "同方股份",
+    "industry": "计算机",
+    "area": "北京",
+    "market": "主板",
+    "list_date": "19970627"
+  },
+  {
+    "ts_code": "688981.SH",
+    "name": "中芯国际",
+    "industry": "半导体",
+    "area": "上海",
+    "market": "科创板",
+    "list_date": "20200716"
+  },
+  {
+    "ts_code": "000666.SZ",
+    "name": "*ST海航",
+    "industry": "航空运输",
+    "area": "海南",
+    "market": "主板",
+    "list_date": "19970618"
+  },
+  {
+    "ts_code": "301234.SZ",
+    "name": "新IPO股",
+    "industry": "电子",
+    "area": "广东",
+    "market": "创业板",
+    "list_date": "20250101"
+  }
+]

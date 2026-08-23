@@ -1,0 +1,90 @@
+[
+  {
+    "ts_code": "600887.SH",
+    "ann_date": "20250815",
+    "end_date": "20251231",
+    "proc": "董事会预案",
+    "exp_date": "20261231",
+    "vol": 50000000.00,
+    "amount": 1500000000.00,
+    "high_limit": 35.00,
+    "low_limit": 25.00
+  },
+  {
+    "ts_code": "600887.SH",
+    "ann_date": "20250815",
+    "end_date": "20251231",
+    "proc": "股东大会",
+    "exp_date": "20261231",
+    "vol": 50000000.00,
+    "amount": 1500000000.00,
+    "high_limit": 35.00,
+    "low_limit": 25.00
+  },
+  {
+    "ts_code": "600887.SH",
+    "ann_date": "20240320",
+    "end_date": "20241231",
+    "proc": "完成",
+    "exp_date": "20241231",
+    "vol": 38000000.00,
+    "amount": 1050000000.00,
+    "high_limit": 32.00,
+    "low_limit": 24.00
+  },
+  {
+    "ts_code": "600887.SH",
+    "ann_date": "20240320",
+    "end_date": "20241231",
+    "proc": "董事会预案",
+    "exp_date": "20241231",
+    "vol": 38000000.00,
+    "amount": 1050000000.00,
+    "high_limit": 32.00,
+    "low_limit": 24.00
+  },
+  {
+    "ts_code": "600887.SH",
+    "ann_date": "20240101",
+    "end_date": "20241231",
+    "proc": "完成",
+    "exp_date": "20241231",
+    "vol": 38000000.00,
+    "amount": 1050000000.00,
+    "high_limit": 32.00,
+    "low_limit": 24.00
+  },
+  {
+    "ts_code": "600887.SH",
+    "ann_date": "20230615",
+    "end_date": "20231231",
+    "proc": "完成",
+    "exp_date": "20231231",
+    "vol": 42000000.00,
+    "amount": 1200000000.00,
+    "high_limit": 33.00,
+    "low_limit": 26.00
+  },
+  {
+    "ts_code": "600887.SH",
+    "ann_date": "20230401",
+    "end_date": "20231231",
+    "proc": "实施",
+    "exp_date": "20231231",
+    "vol": 28000000.00,
+    "amount": 800000000.00,
+    "high_limit": 33.00,
+    "low_limit": 26.00
+  },
+  {
+    "ts_code": "600887.SH",
+    "ann_date": "20230201",
+    "end_date": "20231231",
+    "proc": "实施",
+    "exp_date": "20231231",
+    "vol": 10000000.00,
+    "amount": 300000000.00,
+    "high_limit": 33.00,
+    "low_limit": 26.00
+  }
+]

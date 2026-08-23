@@ -1,0 +1,40 @@
+[
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "营业收入", "ind_value": 391035000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "营业成本", "ind_value": 210000000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "毛利", "ind_value": 181035000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "营销费用", "ind_value": 26960000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "研发费用", "ind_value": 29915000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "经营利润", "ind_value": 123216000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "净利润", "ind_value": 93736000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "归属于母公司净利润", "ind_value": 93736000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "基本每股收益", "ind_value": 6.11},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "稀释每股收益", "ind_value": 6.08},
+
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "营业收入", "ind_value": 383285000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "营业成本", "ind_value": 214137000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "毛利", "ind_value": 169148000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "研发费用", "ind_value": 29915000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "经营利润", "ind_value": 114301000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "净利润", "ind_value": 96995000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "归属于母公司净利润", "ind_value": 96995000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "基本每股收益", "ind_value": 6.16},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "稀释每股收益", "ind_value": 6.13},
+
+  {"ts_code": "AAPL", "end_date": "20220924", "ind_name": "营业收入", "ind_value": 394328000000},
+  {"ts_code": "AAPL", "end_date": "20220924", "ind_name": "经营利润", "ind_value": 119437000000},
+  {"ts_code": "AAPL", "end_date": "20220924", "ind_name": "净利润", "ind_value": 99803000000},
+  {"ts_code": "AAPL", "end_date": "20220924", "ind_name": "归属于母公司净利润", "ind_value": 99803000000},
+  {"ts_code": "AAPL", "end_date": "20220924", "ind_name": "基本每股收益", "ind_value": 6.15},
+
+  {"ts_code": "AAPL", "end_date": "20210925", "ind_name": "营业收入", "ind_value": 365817000000},
+  {"ts_code": "AAPL", "end_date": "20210925", "ind_name": "经营利润", "ind_value": 108949000000},
+  {"ts_code": "AAPL", "end_date": "20210925", "ind_name": "净利润", "ind_value": 94680000000},
+  {"ts_code": "AAPL", "end_date": "20210925", "ind_name": "归属于母公司净利润", "ind_value": 94680000000},
+  {"ts_code": "AAPL", "end_date": "20210925", "ind_name": "基本每股收益", "ind_value": 5.67},
+
+  {"ts_code": "AAPL", "end_date": "20200926", "ind_name": "营业收入", "ind_value": 274515000000},
+  {"ts_code": "AAPL", "end_date": "20200926", "ind_name": "经营利润", "ind_value": 66288000000},
+  {"ts_code": "AAPL", "end_date": "20200926", "ind_name": "净利润", "ind_value": 57411000000},
+  {"ts_code": "AAPL", "end_date": "20200926", "ind_name": "归属于母公司净利润", "ind_value": 57411000000},
+  {"ts_code": "AAPL", "end_date": "20200926", "ind_name": "基本每股收益", "ind_value": 3.28}
+]

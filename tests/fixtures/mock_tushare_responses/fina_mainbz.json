@@ -1,0 +1,29 @@
+[
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20241231",
+    "bz_item": "液体乳",
+    "bz_sales": 85000000000.00,
+    "bz_profit": 22000000000.00,
+    "bz_cost": 63000000000.00,
+    "curr_type": "CNY"
+  },
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20241231",
+    "bz_item": "冷饮产品",
+    "bz_sales": 18000000000.00,
+    "bz_profit": 5500000000.00,
+    "bz_cost": 12500000000.00,
+    "curr_type": "CNY"
+  },
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20241231",
+    "bz_item": "奶粉及奶制品",
+    "bz_sales": 15000000000.00,
+    "bz_profit": 4200000000.00,
+    "bz_cost": 10800000000.00,
+    "curr_type": "CNY"
+  }
+]

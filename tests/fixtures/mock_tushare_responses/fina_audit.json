@@ -1,0 +1,23 @@
+[
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20241231",
+    "audit_result": "标准无保留意见",
+    "audit_agency": "安永华明会计师事务所",
+    "audit_fees": 13500000.00
+  },
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20231231",
+    "audit_result": "标准无保留意见",
+    "audit_agency": "安永华明会计师事务所",
+    "audit_fees": 12800000.00
+  },
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20221231",
+    "audit_result": "标准无保留意见",
+    "audit_agency": "安永华明会计师事务所",
+    "audit_fees": 12000000.00
+  }
+]

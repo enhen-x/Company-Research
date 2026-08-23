@@ -1,0 +1,27 @@
+[
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "经营活动现金净额", "ind_value": 118254000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "投资活动现金净额", "ind_value": -7077000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "筹资活动现金净额", "ind_value": -121983000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "资本支出", "ind_value": 9959000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "折旧及摊销", "ind_value": 11445000000},
+  {"ts_code": "AAPL", "end_date": "20240928", "ind_name": "已付股息", "ind_value": 15025000000},
+
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "经营活动现金净额", "ind_value": 110543000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "投资活动现金净额", "ind_value": -3705000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "筹资活动现金净额", "ind_value": -108488000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "资本支出", "ind_value": 10959000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "折旧及摊销", "ind_value": 11519000000},
+  {"ts_code": "AAPL", "end_date": "20230930", "ind_name": "已付股息", "ind_value": 15025000000},
+
+  {"ts_code": "AAPL", "end_date": "20220924", "ind_name": "经营活动现金净额", "ind_value": 122151000000},
+  {"ts_code": "AAPL", "end_date": "20220924", "ind_name": "资本支出", "ind_value": 10708000000},
+  {"ts_code": "AAPL", "end_date": "20220924", "ind_name": "折旧及摊销", "ind_value": 11104000000},
+
+  {"ts_code": "AAPL", "end_date": "20210925", "ind_name": "经营活动现金净额", "ind_value": 104038000000},
+  {"ts_code": "AAPL", "end_date": "20210925", "ind_name": "资本支出", "ind_value": 11085000000},
+  {"ts_code": "AAPL", "end_date": "20210925", "ind_name": "折旧及摊销", "ind_value": 11284000000},
+
+  {"ts_code": "AAPL", "end_date": "20200926", "ind_name": "经营活动现金净额", "ind_value": 80674000000},
+  {"ts_code": "AAPL", "end_date": "20200926", "ind_name": "资本支出", "ind_value": 7309000000},
+  {"ts_code": "AAPL", "end_date": "20200926", "ind_name": "折旧及摊销", "ind_value": 11056000000}
+]

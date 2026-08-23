@@ -1,0 +1,29 @@
+[
+  {"ts_code": "00700.HK", "end_date": "20241231", "ind_name": "经营业务现金净额", "ind_value": 225000000000},
+  {"ts_code": "00700.HK", "end_date": "20241231", "ind_name": "投资业务现金净额", "ind_value": -95000000000},
+  {"ts_code": "00700.HK", "end_date": "20241231", "ind_name": "融资业务现金净额", "ind_value": -112500000000},
+  {"ts_code": "00700.HK", "end_date": "20241231", "ind_name": "购建无形资产及其他资产", "ind_value": 42000000000},
+  {"ts_code": "00700.HK", "end_date": "20241231", "ind_name": "折旧及摊销", "ind_value": 38500000000},
+  {"ts_code": "00700.HK", "end_date": "20241231", "ind_name": "已付股息(融资)", "ind_value": 45000000000},
+  {"ts_code": "00700.HK", "end_date": "20241231", "ind_name": "已付税项", "ind_value": 28000000000},
+  {"ts_code": "00700.HK", "end_date": "20241231", "ind_name": "收回投资所得现金", "ind_value": 15000000000},
+
+  {"ts_code": "00700.HK", "end_date": "20231231", "ind_name": "经营业务现金净额", "ind_value": 198000000000},
+  {"ts_code": "00700.HK", "end_date": "20231231", "ind_name": "投资业务现金净额", "ind_value": -85000000000},
+  {"ts_code": "00700.HK", "end_date": "20231231", "ind_name": "融资业务现金净额", "ind_value": -99000000000},
+  {"ts_code": "00700.HK", "end_date": "20231231", "ind_name": "购建无形资产及其他资产", "ind_value": 38000000000},
+  {"ts_code": "00700.HK", "end_date": "20231231", "ind_name": "折旧及摊销", "ind_value": 35200000000},
+  {"ts_code": "00700.HK", "end_date": "20231231", "ind_name": "已付股息(融资)", "ind_value": 38000000000},
+
+  {"ts_code": "00700.HK", "end_date": "20221231", "ind_name": "经营业务现金净额", "ind_value": 170500000000},
+  {"ts_code": "00700.HK", "end_date": "20221231", "ind_name": "购建无形资产及其他资产", "ind_value": 35000000000},
+  {"ts_code": "00700.HK", "end_date": "20221231", "ind_name": "折旧及摊销", "ind_value": 32800000000},
+
+  {"ts_code": "00700.HK", "end_date": "20211231", "ind_name": "经营业务现金净额", "ind_value": 183200000000},
+  {"ts_code": "00700.HK", "end_date": "20211231", "ind_name": "购建无形资产及其他资产", "ind_value": 30000000000},
+  {"ts_code": "00700.HK", "end_date": "20211231", "ind_name": "折旧及摊销", "ind_value": 30500000000},
+
+  {"ts_code": "00700.HK", "end_date": "20201231", "ind_name": "经营业务现金净额", "ind_value": 161100000000},
+  {"ts_code": "00700.HK", "end_date": "20201231", "ind_name": "购建无形资产及其他资产", "ind_value": 28000000000},
+  {"ts_code": "00700.HK", "end_date": "20201231", "ind_name": "折旧及摊销", "ind_value": 28200000000}
+]

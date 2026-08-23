@@ -1,0 +1,62 @@
+[
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20241231",
+    "ann_date": "20250420",
+    "div_proc": "实施",
+    "stk_div": 0.0,
+    "cash_div_tax": 0.97,
+    "record_date": "20250610",
+    "ex_date": "20250611",
+    "pay_date": "20250611",
+    "base_share": 636363.64
+  },
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20231231",
+    "ann_date": "20240420",
+    "div_proc": "实施",
+    "stk_div": 0.0,
+    "cash_div_tax": 0.87,
+    "record_date": "20240610",
+    "ex_date": "20240611",
+    "pay_date": "20240611",
+    "base_share": 636363.64
+  },
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20221231",
+    "ann_date": "20230420",
+    "div_proc": "实施",
+    "stk_div": 0.0,
+    "cash_div_tax": 0.82,
+    "record_date": "20230610",
+    "ex_date": "20230611",
+    "pay_date": "20230611",
+    "base_share": 636363.64
+  },
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20211231",
+    "ann_date": "20220420",
+    "div_proc": "实施",
+    "stk_div": 0.0,
+    "cash_div_tax": 0.73,
+    "record_date": "20220610",
+    "ex_date": "20220611",
+    "pay_date": "20220611",
+    "base_share": 636363.64
+  },
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20201231",
+    "ann_date": "20210420",
+    "div_proc": "实施",
+    "stk_div": 0.0,
+    "cash_div_tax": 0.63,
+    "record_date": "20210610",
+    "ex_date": "20210611",
+    "pay_date": "20210611",
+    "base_share": 636363.64
+  }
+]

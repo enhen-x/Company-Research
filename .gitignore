@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Codex
+.codex/*
+!.codex/skills/
+.agents/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project runtime outputs
+output/*
+!output/.gitkeep
+scripts/output/
+notebooks/output/
+
+# Sensitive
+.env
+*.token
+
+# PDF files (annual reports, too large for git)
+*.pdf
+
+# Tushare cache
+tushare_data/
+
+# Video assets
+video/
+
+# Project
+codex-progress.txt
+CODEX.md
+feature_list.json
+
+# Merge-specific
+*.bak*
+.pytest_cache/

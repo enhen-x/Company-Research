@@ -1,0 +1,23 @@
+[
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20241231",
+    "holder_name": "呼和浩特投资有限责任公司",
+    "hold_amount": 576000000,
+    "hold_ratio": 9.05
+  },
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20241231",
+    "holder_name": "香港中央结算有限公司",
+    "hold_amount": 512000000,
+    "hold_ratio": 8.05
+  },
+  {
+    "ts_code": "600887.SH",
+    "end_date": "20241231",
+    "holder_name": "潘刚",
+    "hold_amount": 258000000,
+    "hold_ratio": 4.05
+  }
+]
