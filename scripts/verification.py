@@ -136,6 +136,22 @@ def main() -> None:
     eq_now = bs.loc[bs[dc_b] == d, eq_c]
     bps_now = ind.loc[ind[dc_n] == d, bps_c]
     shares = float(eq_now.iloc[0]) / float(bps_now.iloc[0]) if not eq_now.empty and not bps_now.empty else np.nan
+    # 2026-08-23 中远海控批次校准：总股本优先取 公司概况.csv（腾讯实时，含回购注销），
+    # 净资产/BPS 推算值为最新报告期口径，二者偏差>2% 时告警
+    prof_f = DATA / "公司概况.csv"
+    if prof_f.exists():
+        try:
+            pdf = pd.read_csv(prof_f, encoding="utf-8-sig", dtype=str)
+            pvals = dict(zip(pdf.iloc[:, 0], pdf.iloc[:, 1]))
+            for k, v in pvals.items():
+                if "总股本" in str(k):
+                    p_shares = float(v) / 1e6
+                    if np.isfinite(shares) and abs(p_shares - shares) / shares > 0.02:
+                        print(f"[WARN] 股本口径偏差：公司概况 {p_shares:.2f} 百万股 vs 净资产/BPS 推算 {shares:.2f} 百万股（采用公司概况）")
+                    shares = p_shares
+                    break
+        except Exception as exc:
+            print(f"[WARN] 读取公司概况失败: {exc}")
 
     px_c = px.columns[0]
     close_c = [c for c in px.columns if "close" in c.lower() or "收盘" in c][0]

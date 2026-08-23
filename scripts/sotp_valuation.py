@@ -37,12 +37,20 @@ import json
 from pathlib import Path
 
 
-def detect_platform(segment: dict | None) -> dict:
+def detect_platform(segment: dict | None, extra: dict | None = None) -> dict:
     """从 运营补充数据.json 的 segment 键自动检测平台型公司。segment 结构：
-    {"labels":["2023","2024","2025"], "series":[{"name":"A","values":[1,2,3]}], ...}"""
+    {"labels":["2023","2024","2025"], "series":[{"name":"A","values":[1,2,3]}], ...}
+    extra（运营补充数据.json 的 sotp_trigger 键，可选）：
+      {"growth": true, "listed_subsidiaries": ["00316.HK","01199.HK"], "note": "..."}
+      —— 营收占比法（C1≤70%）对『单一收入主导但多估值锚』（如中远海控：集运>70% 但
+         东方海外/中远海运港口为上市子公司有独立市值锚）不敏感，分析确认后置 true。"""
     reasons, checks = [], {}
     if not segment or not segment.get("series") or not segment.get("labels"):
-        return {"enabled": False, "reasons": ["无分部数据（segment 缺失），无法检测，默认不触发"], "checks": checks}
+        reasons = ["无分部数据（segment 缺失），无法检测，默认不触发"]
+        if extra and (extra.get("growth") or extra.get("listed_subsidiaries")):
+            reasons.append(f"sotp_trigger 指定多估值锚（{extra.get('listed_subsidiaries') or 'growth'}），分析确认触发")
+            return {"enabled": True, "reasons": reasons, "checks": checks}
+        return {"enabled": False, "reasons": reasons, "checks": checks}
     n = len(segment["labels"])
     last_idx = n - 1
     rows = []
@@ -76,12 +84,19 @@ def detect_platform(segment: dict | None) -> dict:
     g_range = (max(growth) - min(growth)) if len(growth) >= 2 else 0.0
     checks["分部营收CAGR极差"] = round(g_range, 4)
     c3 = g_range > 0.20
-    c4 = False  # 由 agent 在 sotp_输入.json 标注 growth=true 确认
+    _extra = extra or {}
+    c4 = bool(_extra.get("growth")) or bool(_extra.get("listed_subsidiaries"))
     reasons.append(f"C1 分部数 {n_seg}≥3 且最大占比 {max_pct:.1%}≤70%: {'✓' if c1 else '✗'}")
     reasons.append(f"C2 第二大分部占比 {sec_pct:.1%}≥10%: {'✓' if c2 else '✗'}")
     reasons.append(f"C3 分部营收CAGR极差 {g_range:.1%}>20%（成长/成本分化→估值锚不同）: {'✓' if c3 else '✗'}")
-    reasons.append("C4 存在成长/主题分部：由分析在 sotp_输入.json 标注 growth=true 确认")
-    enabled = c1 and (c2 or c3 or c4)
+    reasons.append(f"C4 存在成长/主题分部或上市子公司多估值锚（sotp_trigger: growth={bool(_extra.get('growth'))}, listed={_extra.get('listed_subsidiaries') or '-'}）: {'✓' if c4 else '✗'}")
+    # C4（多估值锚/成长分部，分析显式确认）可直接触发，不受 C1 营收集中度硬门槛限制
+    # ——2026-08-23 中远海控批次：集运营收 >70% 但东方海外/中远海运港口为上市子公司（独立市值锚），
+    #    营收占比法漏检，需 C4 覆盖（框架 B4.6 平台型强制）。
+    enabled = (c1 and (c2 or c3 or c4)) or c4
+    if c4 and not (c1 and (c2 or c3)):
+        reasons.append("C4 多估值锚触发：营收占比法（C1≤70%）对单一收入主导但多估值锚公司不敏感，"
+                       "按分析确认强制执行（等同于 --force）")
     verdict = "平台型公司（建议强制 SOTP）" if enabled else "非平台型（SOTP 可选/跳过）"
     reasons.append(f"判定：{verdict}")
     return {"enabled": enabled, "reasons": reasons, "checks": checks}
@@ -185,6 +200,7 @@ def main() -> int:
     ap.add_argument("--dir", default=".", help="批次目录（含 input/ 与 reports/）")
     ap.add_argument("--input", default="input/sotp_输入.json", help="SOTP 输入 JSON 路径（相对 --dir）")
     ap.add_argument("--detect-only", action="store_true", help="仅检测平台型，不计算")
+    ap.add_argument("--force", action="store_true", help="自动检测不触发时强制执行 SOTP（分析确认多估值锚后使用）")
     ap.add_argument("--selftest", action="store_true", help="用昊华科技校准用例自检")
     args = ap.parse_args()
 
@@ -196,13 +212,19 @@ def main() -> int:
 
     root = Path(args.dir)
     ops_f = root / "input" / "运营补充数据.json"
-    segment = None
+    segment, extra = None, None
     if ops_f.exists():
         try:
-            segment = json.loads(ops_f.read_text(encoding="utf-8")).get("segment")
+            ops_all = json.loads(ops_f.read_text(encoding="utf-8"))
+            segment = ops_all.get("segment")
+            extra = ops_all.get("sotp_trigger")
         except Exception as exc:
             print(f"[WARN] 读取运营补充数据失败: {exc}")
-    trig = detect_platform(segment)
+    trig = detect_platform(segment, extra)
+    if not trig["enabled"] and args.force:
+        trig["enabled"] = True
+        trig["reasons"].append("--force：分析确认平台型/多估值锚（如上市子公司有独立市值、成长分部），强制执行 SOTP")
+        print("[强制] --force 已启用 SOTP（原因见 sotp_触发.json）")
     (root / "input" / "sotp_触发.json").write_text(json.dumps(trig, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[触发] enabled={trig['enabled']}")
     for r in trig["reasons"]:
@@ -212,7 +234,7 @@ def main() -> int:
         return 0
 
     if not trig["enabled"]:
-        print("[跳过] 非平台型公司，SOTP 可选（如仍做，可手动设 sotp_输入.json 并 --force）")
+        print("[跳过] 非平台型公司，SOTP 可选（如仍做：运营补充数据.json 加 sotp_trigger 标注多估值锚，或 --force 强制执行）")
         return 0
 
     inp_f = root / args.input

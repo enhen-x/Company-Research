@@ -115,3 +115,22 @@ scripts/（chart_qc 的 G8-RENDER 会重载项目内 analyze_charts.py），跑�
   升级必须由实际数据（中报/季报/合同负债）验证触发，预测本身不构成升级。
 - 实测（小商品城）：C_fwd=55亿/M_fwd=0.55/k_fwd=0.8 → R*_fwd 3.54%、目标买入价_fwd 11.99 元、
   成长验证买入区 [6.83, 11.99] 元；KK_fwd -0.14pct 仍 <0 → 评级维持中性/观望。
+
+
+## 10. 中远海控批次事故记录（2026-08-23，已修复并回写模板）
+
+| # | 事故 | 根因 | 模板修复 | 复现/自检 |
+|---|------|------|----------|-----------|
+| 1 | `fetch_peers_financials.py` 港股同行（00316/01308）被误判为深市，F10/三表接口全部失败 | `infer_market` 无港股分支；东财 A 股接口不支持港股 | 同行支持 `代码.市场:名称`（如 `00316.HK:东方海外国际`）；港股行情取腾讯（PE/市值），PB 置 None、财务数据提示联网/手工补齐 | pytest + 功能验证 |
+| 2 | `build_penetration_input.py` 股本取资产负债表 SHARE_CAPITAL，回购注销后为历史口径 → 市值 2,635 亿 vs 腾讯实时 2,597 亿（偏差 1.5%） | 股本口径陈旧 | 优先取 `data/公司概况.csv`（腾讯实时 总股本/总市值）；>3% 偏差打印 WARN 并保留两口径 | 功能验证 |
+| 3 | `analyze_charts.py` 图13 PE 估值带：亏损年 PE 为 None → `fill_between` 抛 `ufunc 'isfinite' not supported` | pe_low/pe_high 数组含 None 未清洗 | 新增 `_fnum` 清洗（None→NaN），fill_between 用有限值掩码；图14 PB 带同步加固 | template_regression + 功能验证（含 None 用例） |
+| 4 | `analyze_charts.py` 图16 行业成本—价格：月度观测 2026-04/06/08 过密 → G8 横坐标刻度重合 FAIL | `_pick_even_ticks` 在观测数 ≤max_ticks 时全量返回，无最小间隔约束 | `_pick_even_ticks` 强制相邻刻度最小间隔（span/max_ticks×0.5），仍超限均匀抽稀；刻度 ≥6 自动旋转 25° | template_regression（负向自检仍抓旧 bug） |
+| 5 | `analyze_charts.py` 图04 盈利能力：图例 upper left 与 ROE 柱重叠（G8-RENDER WARN 12%） | 图例默认位置 | `fig_profitability` 图例移到图下（bbox_to_anchor=(0.5,-0.12), ncol=3, bottom=0.18） | template_regression |
+| 6 | `sotp_valuation.py` 平台型自动检测漏检：中远海控集运营收 >70% 但东方海外/中远海运港口为上市子公司（独立市值锚） | C1 营收集中度硬门槛（≤70%）与"多估值锚平台强制 SOTP"冲突 | ① `运营补充数据.json` 新增 `sotp_trigger` 键（growth / listed_subsidiaries），C4 多估值锚可直接触发（不受 C1 限制）；② 实现 `--force`（原提示有但未实现） | 功能验证（中远海控 3 分部场景） |
+| 7 | `format_qc.py` F7：`R*`（龟龟术语）被计为斜体标记 → 误报奇数个 `*` | 单星计数未排除术语/代码 | F7 先剔除代码围栏与行内代码；单星正则要求两侧非 ASCII 字母/数字/下划线/星号（`R*_fwd` 视为字面量）；仍误报时提示用反引号 | 功能验证 |
+| 8 | `calc_penetration_return.py --json > out.json` 在 PowerShell 5.1 下产出 UTF-16 文件，后续 UTF-8 读取失败 | PS `>` 重定向默认编码 | 新增 `--out <路径>`：脚本内部 `write_text(utf-8)` 直接落盘，无需 shell 重定向 | 功能验证（无 BOM/UTF-16） |
+| 9 | `dcf_cm.py` shares_mm 单位易错（15268.136 vs 152681.36，10x）→ 静默得到错误每股值 | 无输入校验 | 新增校验：每股价值 0.5~500 元硬门槛 + 可选 `price` 字段的价/现值比（0.2~5）WARN；命中即提示检查 shares_mm 单位（百万股） | 功能验证 |
+| 10 | `verification.py` 股本用净资产/BPS 推算（最新报告期口径）vs 腾讯实时股本偏差 0.3% | 双口径 | 优先取 `data/公司概况.csv` 总股本，偏差 >2% 告警 | 功能验证 |
+
+**PowerShell 重定向铁律（再次强调）**：`python ... --json > out.json` 在 PS 5.1 默认 UTF-16；
+凡脚本提供 `--out`（calc_penetration_return 已支持）一律用 `--out` 落盘；确需重定向时先探测编码并转 UTF-8。

@@ -214,13 +214,16 @@ def main() -> int:
         # F4/F12-F16 表格（2026-08-18 全面固化）
         fails.extend(check_tables(lines))
 
-        # F7 标记闭合
-        b = len(re.findall(r"\*\*", text))
+        # F7 标记闭合（2026-08-23 校准：先剔除代码围栏与行内代码；`R*` 等术语星号不误报，
+        #   规则：单星号两侧不得为 ASCII 字母/数字/下划线/星号——`R*_fwd` 视为术语字面量）
+        t7 = re.sub(r"```.*?```", "", text, flags=re.S)
+        t7 = re.sub(r"`[^`]*`", "", t7)
+        b = len(re.findall(r"\*\*", t7))
         if b % 2 != 0:
             warns.append(f"F7: 粗体标记 ** 数量为奇数（{b}）")
-        i1 = len(re.findall(r"(?<!\*)\*(?!\*)", text))
+        i1 = len(re.findall(r"(?<![*A-Za-z0-9_])[*](?![*A-Za-z0-9_])", t7))
         if i1 % 2 != 0:
-            warns.append(f"F7: 斜体标记 * 数量为奇数（{i1}）")
+            warns.append(f"F7: 斜体标记 * 数量为奇数（{i1}；R* 等术语请用反引号包裹）")
 
         # F8/F9 图片
         cnt: dict[str, int] = {}

@@ -54,6 +54,35 @@ def close_col(df) -> str:
             return cand
     raise KeyError(f"日线 CSV 缺少收盘价列，现有列: {list(df.columns)}")
 
+def shares_from_profile(data_dir: Path) -> tuple[float | None, float | None]:
+    """从 公司概况.csv（腾讯 item/value 行）读取 总股本(百万股)/总市值(百万元)。
+    2026-08-23 中远海控批次校准：资产负债表 SHARE_CAPITAL 可能为历史口径（回购注销后未更新），
+    导致 price×shares 市值与腾讯实时总市值偏差；概况为当前权威口径，优先采用。"""
+    f = data_dir / "公司概况.csv"
+    if not f.exists():
+        return None, None
+    try:
+        df = pd.read_csv(f, encoding="utf-8-sig", dtype=str)
+        if df.shape[1] < 2:
+            return None, None
+        vals = dict(zip(df.iloc[:, 0], df.iloc[:, 1]))
+        shares = mktcap = None
+        for k, v in vals.items():
+            k2 = str(k).strip()
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            if "总股本" in k2:
+                shares = fv / 1e6      # 股 -> 百万股
+            elif "总市值" in k2:
+                mktcap = fv / 1e6      # 元 -> 百万元
+        return (shares if shares and shares > 0 else None,
+                mktcap if mktcap and mktcap > 0 else None)
+    except Exception:
+        return None, None
+
+
 def val_mm(df: pd.DataFrame, col: str) -> list:
     """年报列值序列（元 -> 百万元），缺失填 0。仅用于金额列。"""
     if col not in df.columns:
@@ -129,7 +158,15 @@ def main():
 
     # --- M 法2: DPS×股本/归母净利（近3年；分配股利现金列含利息，禁用）---
     dps_fy = dps_by_fiscal_year(div)
-    shares_mm = float(bs.iloc[-1].get("SHARE_CAPITAL", 0) or 0) / UNIT  # 面值1元 -> 百万股
+    _sh, _mc = shares_from_profile(data)
+    shares_mm = _sh
+    shares_src = "公司概况.csv（腾讯实时）" if _sh else ""
+    if shares_mm is None:
+        shares_mm = float(bs.iloc[-1].get("SHARE_CAPITAL", 0) or 0) / UNIT  # 面值1元 -> 百万股
+        shares_src = "资产负债表 SHARE_CAPITAL"
+    if shares_mm is None or shares_mm <= 0:
+        shares_mm = round(C_new[0] / (eps_new[0] if eps_new[0] > 0 else 1), 3)
+        shares_src = "C/EPS 反推"
     m2 = []
     for i in range(min(3, len(years))):
         y = years[-1 - i]
@@ -193,7 +230,13 @@ def main():
     if shares_mm <= 0:
         shares_mm = round(C_new[0] / (eps_new[0] if eps_new[0] > 0 else 1), 3)
     price = args.price if args.price else float(daily[daily_close].iloc[-1])
-    market_cap = round(price * shares_mm, 1)  # 百万元
+    if _mc:
+        market_cap = round(_mc, 1)  # 公司概况总市值（腾讯实时，百万元）
+        _mc2 = round(price * shares_mm, 1)
+        if abs(_mc2 - market_cap) / market_cap > 0.03:
+            print(f"[WARN] 市值交叉校验偏差 {abs(_mc2-market_cap)/market_cap*100:.1f}%：概况市值 {market_cap} 百万 vs price×shares {_mc2} 百万（股本口径 {shares_src}）")
+    else:
+        market_cap = round(price * shares_mm, 1)  # 百万元
 
     goodwill = lv("GOODWILL") / UNIT
     total_assets = lv("TOTAL_ASSETS") / UNIT
@@ -248,7 +291,7 @@ def main():
         f"- AA_2y: {cfg['aa_2y']} / AA_all: {cfg['aa_all']}（surplus 序列: {cfg['surplus_series']}）",
         f"- net_cash 狭义(货币资金): {net_cash_narrow:.1f} 百万 / 广义(含交易性金融资产): {net_cash_broad:.1f} 百万",
         f"- 有息负债: {cfg['interest_bearing_debt']} 百万（短借+长借+应付债+短融，默认不含租赁）",
-        f"- shares: {cfg['shares']} 百万股 / market_cap: {cfg['market_cap']} 百万 / price: {cfg['price']}",
+        f"- shares: {cfg['shares']} 百万股 / market_cap: {cfg['market_cap']} 百万 / price: {cfg['price']}（股本来源: {shares_src}）",
         f"- ebitda: {cfg['ebitda']}（营业利润+D）/ fcf: {cfg['fcf']}（OCF-Capex）/ dps: {cfg['dps']}（最新财年含中期）",
         f"- low_10y_close: {cfg['low_10y_close']}（前复权10年最低收盘）",
         "",

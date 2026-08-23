@@ -42,8 +42,11 @@ def p(msg: str) -> None:
     print(msg, flush=True)
 
 
-def infer_market(code: str) -> str:
-    """按代码推断市场前缀：6/9→SH，0/3→SZ，4/8/92→BJ"""
+def infer_market(code: str, hint: str = "") -> str:
+    """按代码推断市场前缀：6/9→SH，0/3→SZ，4/8/92→BJ；hint 可显式指定（如 'HK'）。"""
+    h = (hint or "").strip().upper()
+    if h in ("SH", "SZ", "BJ", "HK"):
+        return h
     c = code.strip()
     if c.startswith(("4", "8")) or c.startswith("92"):
         return "BJ"
@@ -72,7 +75,8 @@ def fetch_retry(fn, name: str, retries: int = 3, delay: float = 12.0):
 
 
 def qq_quote(symbols: list[str]) -> dict:
-    """腾讯实时行情 -> {code: {price, pe_ttm, pb, mktcap_亿}}"""
+    """腾讯实时行情 -> {code: {price, pe_ttm, pb, mktcap_亿}}。
+    港股（hk 前缀）PB 字段布局与 A 股不同（f[46] 为英文名），PB 置 None 待手工补齐。"""
     url = "https://qt.gtimg.cn/q=" + ",".join(symbols)
     r = requests.get(url, timeout=10)
     r.encoding = "gbk"
@@ -82,17 +86,27 @@ def qq_quote(symbols: list[str]) -> dict:
         if not m:
             continue
         f = m.group(1).split("~")
-        # f[3]=现价 f[39]=PE_TTM f[45]=总市值(亿) f[46]=PB；字段数须 ≥47 才含 PB
+        # f[3]=现价 f[39]=PE_TTM f[45]=总市值(亿)；A股 f[46]=PB，港股 f[46]=英文名
         if len(f) < 47:
             continue
         try:
             out[f[2]] = {
                 "price": float(f[3]), "pe_ttm": float(f[39]),
-                "pb": float(f[46]), "mktcap_亿": float(f[45]),
+                "pb": None if f[2].isdigit() and len(f[2]) == 5 and not f[46].replace(".", "").isdigit() else _pb_or_none(f),
+                "mktcap_亿": float(f[45]),
             }
         except (TypeError, ValueError):
             continue
     return out
+
+
+def _pb_or_none(f: list[str]) -> float | None:
+    """A 股 f[46] 为 PB；港股该位为英文名，返回 None。"""
+    try:
+        v = float(f[46])
+        return v if 0 < v < 200 else None
+    except (TypeError, ValueError):
+        return None
 
 
 def f10_annual(code: str, mkt: str) -> dict | None:
@@ -232,14 +246,21 @@ def sheets_annual(code: str) -> dict | None:
     }
 
 
-def parse_peers(s: str) -> list[tuple[str, str]]:
+def parse_peers(s: str) -> list[tuple[str, str, str]]:
+    """解析同行列表 '代码.市场:名称,代码:名称'；市场可选（SH/SZ/BJ/HK），缺省自动推断。
+    港股必须带 .HK 前缀（如 '00316.HK:东方海外国际'），否则 0/3 开头会被误判为深市。"""
     out = []
     for item in (s or "").split(","):
         item = item.strip()
         if not item:
             continue
         code, _, name = item.partition(":")
-        out.append((code.strip(), (name or code).strip()))
+        code = code.strip()
+        market = ""
+        if "." in code:
+            code, _, market = code.partition(".")
+            market = market.strip().upper()
+        out.append((code, (name or code).strip(), market))
     return out
 
 
@@ -272,15 +293,16 @@ def main() -> int:
     peers = parse_peers(args.peers)
     quotes = {}
     try:
-        syms = [f"{infer_market(c).lower()}{c}" for c, _ in peers]
+        syms = [f"{infer_market(c, m).lower()}{c}" for c, _, m in peers]
         quotes = qq_quote(syms)
-        p("[腾讯] 实时行情: " + ", ".join(f"{c}={quotes.get(c, {}).get('price')}" for c, _ in peers))
+        p("[腾讯] 实时行情: " + ", ".join(f"{c}={quotes.get(c, {}).get('price')}" for c, _, _ in peers))
     except Exception as exc:
         p(f"[降级] 腾讯实时行情失败: {exc}，将回退项目内同行日线 CSV")
 
     rows, failures = [], []
-    for code, name in peers:
-        row = {"代码": code, "公司": name, "营收(亿)": None, "营收增速%": None, "净利增速%": None}
+    for code, name, mkt_hint in peers:
+        market = infer_market(code, mkt_hint)
+        row = {"代码": code, "市场": market, "公司": name, "营收(亿)": None, "营收增速%": None, "净利增速%": None}
         q = quotes.get(code, {})
         row["最新价"] = q.get("price")
         row["现价日期"] = datetime.now().strftime("%Y-%m-%d") if q.get("price") is not None else ""
@@ -293,26 +315,30 @@ def main() -> int:
             row["TTM归母净利_亿"] = None
 
         got = None
-        try:
-            got = f10_annual(code, infer_market(code))
-            if got:
-                p(f"[OK] {name}: F10 {got['报告期']} EPS={got['EPS']} BPS={got['BPS']} ROE={got['ROE加权%']}")
-        except Exception as exc:
-            p(f"[降级] {name} F10 失败: {exc}")
-        if not got:
+        if market == "HK":
+            # 港股无东财 F10/三表 A 股接口，行情已取，财务数据需联网/手工补齐
+            p(f"[HK] {name}: 港股财务数据无 A 股接口，需联网搜索补齐（BPS/DPS/归母净利/ROE）")
+        else:
             try:
-                got = ind_annual(code, infer_market(code))
+                got = f10_annual(code, market)
                 if got:
-                    p(f"[OK] {name}: 财务指标接口(单季求和) {got['报告期']} EPS={got['EPS']} BPS={got['BPS']}")
+                    p(f"[OK] {name}: F10 {got['报告期']} EPS={got['EPS']} BPS={got['BPS']} ROE={got['ROE加权%']}")
             except Exception as exc:
-                p(f"[降级] {name} 财务指标接口失败: {exc}")
-        if not got:
-            try:
-                got = sheets_annual(code)
-                if got:
-                    p(f"[OK] {name}: 三表接口 {got['报告期']}")
-            except Exception as exc:
-                p(f"[降级] {name} 三表接口失败: {exc}")
+                p(f"[降级] {name} F10 失败: {exc}")
+            if not got:
+                try:
+                    got = ind_annual(code, market)
+                    if got:
+                        p(f"[OK] {name}: 财务指标接口(单季求和) {got['报告期']} EPS={got['EPS']} BPS={got['BPS']}")
+                except Exception as exc:
+                    p(f"[降级] {name} 财务指标接口失败: {exc}")
+            if not got:
+                try:
+                    got = sheets_annual(code)
+                    if got:
+                        p(f"[OK] {name}: 三表接口 {got['报告期']}")
+                except Exception as exc:
+                    p(f"[降级] {name} 三表接口失败: {exc}")
         if not got:
             p(f"[WARN] {code} {name} 全部接口不可用 → 请在下方提示后手工补齐该行")
             failures.append(f"{code} {name}")
@@ -332,7 +358,7 @@ def main() -> int:
         time.sleep(8)  # 限流保护
 
     df = pd.DataFrame(rows)
-    cols = ["代码", "公司", "最新价", "现价日期", "PE_TTM", "PB", "总市值_亿",
+    cols = ["代码", "市场", "公司", "最新价", "现价日期", "PE_TTM", "PB", "总市值_亿",
             "报告期", "EPS", "BPS", "ROE加权%", "归母净利(亿)", "归母净资产(亿)",
             "营收(亿)", "营收增速%", "净利增速%",
             "TTM归母净利_亿", "数据来源"]
@@ -346,6 +372,7 @@ def main() -> int:
 
     if failures:
         p("\n[兜底提示] 请用联网搜索补齐以下同行年报数据（2025 年报口径）并手工写入 CSV：")
+        p("  港股（.HK 前缀）行情已自动取，但需手工补齐：每股净资产 BPS、全年每股股息 DPS、归母净利、ROE")
         p("  每股净资产 BPS、全年每股股息 DPS、归母净利、ROE（来源：公司年报摘要/利润分配公告）")
         return 1
     return 0

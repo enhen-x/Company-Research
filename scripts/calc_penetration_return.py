@@ -382,6 +382,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description='龟龟投资策略 v2 穿透回报率计算器')
     ap.add_argument('--config', type=Path, help='输入 JSON 配置')
     ap.add_argument('--json', action='store_true', help='纯 JSON 输出到 stdout（人类可读文本 → stderr）')
+    ap.add_argument('--out', type=Path, help='JSON 输出文件路径（推荐，避免 PowerShell `>` 重定向产生 UTF-16 文件；2026-08-23 中远海控批次事故）')
     ap.add_argument('--no-grid', action='store_true', help='跳过 G 敏感性网格的渲染输出（JSON 的 g_grid 恒在）')
     ap.add_argument('--selftest', action='store_true', help='用凌霄泵业数据自检')
     args = ap.parse_args()
@@ -396,7 +397,12 @@ def main() -> int:
     if args.json:
         # 唯一真值：stdout 只出纯 JSON（可 > 穿透回报率_输出.json 供机器解析）；文本走 stderr 不污染 stdout
         sys.stderr.write(text + '\n')
-        print(json.dumps(out, ensure_ascii=False, indent=2))
+        payload = json.dumps(out, ensure_ascii=False, indent=2)
+        if args.out:
+            args.out.write_text(payload, encoding='utf-8')
+            sys.stderr.write(f'[OK] JSON 已写入 {args.out}（UTF-8，无需 shell 重定向）\n')
+        else:
+            print(payload)
     else:
         print(text)
     return 0

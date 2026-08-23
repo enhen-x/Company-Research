@@ -18,6 +18,7 @@
   "wacc_grid": [0.045, 0.05, 0.055, 0.06],
   "g_grid": [0.0, 0.005, 0.01, 0.015],
   "base_scenario": "基准", "base_wacc": 0.055, "base_g": 0.01,
+  "price": 17.01,                # 可选：当前股价，用于校验 DCF 每股价值与现价比值是否异常（单位错误拦截）
   "口径": "FCFF；净现金 2,229.12 亿（2026-06-30 广义 3,217.40 - 有息负债 988.28）；股本 216.87 亿股；金额亿元",
   "terminal_note": "终值占比约 79%-82%，DCF 对 g 与 WACC 高度敏感，仅作相对估值交叉锚（GG 主导）"
 }
@@ -70,6 +71,7 @@ def main() -> int:
     wacc_grid, g_grid = cfg["wacc_grid"], cfg["g_grid"]
     base_name = cfg.get("base_scenario", "基准")
     base_wacc, base_g = cfg.get("base_wacc", 0.055), cfg.get("base_g", 0.01)
+    price_ref = float(cfg.get("price", 0) or 0)
 
     out = {
         "meta": {
@@ -94,6 +96,21 @@ def main() -> int:
     print(f"[OK] {OUT}")
     for k, v in out["scenarios"].items():
         print(f"  {k}: {v['per_share']} 元/股（终值占比 {v['tv_share']*100:.0f}%）")
+    # 输入合理性校验（2026-08-23 中远海控批次：shares_mm 单位易错 10x，静默得到错误每股值）
+    for k, v in out["scenarios"].items():
+        if v["per_share"] < 0.5 or v["per_share"] > 500:
+            print(f"[WARN] {k} 每股价值 {v['per_share']} 元异常——请检查 shares_mm 是否为『百万股』"
+                  f"（如 152.68 亿股 → 15268.136），或 fcf_paths 单位是否为亿元")
+    base_px = out["scenarios"][base_name]["per_share"]
+    if not (0.5 <= base_px <= 500):
+        print("[FAIL] 基准每股价值超出合理区间（0.5~500 元），请修正输入后重跑")
+        return 1
+    if price_ref and price_ref > 0:
+        ratio = base_px / price_ref
+        if ratio < 0.2 or ratio > 5:
+            print(f"[WARN] 基准每股价值 {base_px} 元 与现价 {price_ref} 元之比 {ratio:.2f} 偏离过大"
+                  f"——请检查 shares_mm 是否为『百万股』（如 152.68 亿股 → 15268.136）、fcf_paths 单位是否为亿元")
+    print(f"[OK] 输入校验通过：shares_mm={shares_mm} 百万股，基准每股 {base_px} 元")
     return 0
 
 

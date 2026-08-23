@@ -174,6 +174,12 @@ def e8(v):
     n = num(v)
     return n / 1e8 if n is not None else None
 
+def _fnum(v) -> float:
+    """估值带数组元素清洗：None/非数 -> np.nan（供 fill_between/plot 安全处理）。
+    2026-08-23 中远海控批次：亏损年 PE 为 None 曾使 fill_between 抛 isfinite 异常。"""
+    n = num(v)
+    return n if n is not None and np.isfinite(n) else np.nan
+
 def _col(df: pd.DataFrame, *candidates: str) -> str | None:
     """Return first matching column name."""
     for c in candidates:
@@ -683,7 +689,7 @@ def fig_industry_cost_price(ops: dict, data_dir: Path) -> plt.Figure | None:
     tick_ax = ax2 if has_volume else ax1
     tick_ax.set_xticks([mdates.date2num(t) for t in ticks])
     tick_ax.set_xticklabels([t.strftime("%Y-%m") for t in ticks],
-                            rotation=0 if len(ticks) <= 8 else 25, ha="right", fontsize=8)
+                            rotation=25 if len(ticks) >= 6 else 0, ha="right", fontsize=8)
     for ax in fig.axes:
         if ax is not tick_ax:
             ax.tick_params(labelbottom=False)
@@ -738,17 +744,21 @@ def _volume_bar_width(freq: str) -> float:
 
 
 def _pick_even_ticks(all_dt, max_ticks: int = 8):
-    """图16 辅助：按时间等距抽样 ≤max_ticks 个观测日期作为刻度，避免横坐标文字重合。"""
-    if len(all_dt) <= max_ticks:
-        return all_dt
+    """图16 辅助：按时间等距抽样 ≤max_ticks 个观测日期作为刻度，并强制相邻刻度最小间隔，
+    避免横坐标文字重合（2026-08-23 中远海控批次：月度观测 2026-04/06/08 过密触发 G8 失败）。"""
+    if len(all_dt) <= 1:
+        return sorted(all_dt)
     t0, t1 = mdates.date2num(min(all_dt)), mdates.date2num(max(all_dt))
-    step = (t1 - t0) / max_ticks
+    span = t1 - t0
+    step = span / max_ticks if span > 0 else 1.0
+    min_gap = max(step * 0.5, 1.0)
     picked = []
-    for k in range(max_ticks):
-        target = t0 + step * (k + 0.5)
-        best = min(all_dt, key=lambda dt: abs(mdates.date2num(dt) - target))
-        if not picked or (mdates.date2num(best) - mdates.date2num(picked[-1])) >= step * 0.5:
-            picked.append(best)
+    for dt in sorted(all_dt):
+        if not picked or (mdates.date2num(dt) - mdates.date2num(picked[-1])) >= min_gap:
+            picked.append(dt)
+    if len(picked) > max_ticks:
+        idx = sorted({int(i * (len(picked) - 1) / (max_ticks - 1)) for i in range(max_ticks)})
+        picked = [picked[i] for i in idx]
     return picked
 
 def fig_profitability(ops: dict) -> plt.Figure | None:
@@ -776,7 +786,8 @@ def fig_profitability(ops: dict) -> plt.Figure | None:
     ax1.set_title(d.get("标题", "图04 盈利能力趋势") + " → §4 财务分析", fontsize=13, fontweight="bold")
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=9)
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3, fontsize=9)
+    fig.subplots_adjust(bottom=0.18)
     ax1.set_xlabel(f"年份 ｜ {SRC}", fontsize=8)
     return fig
 
@@ -1074,15 +1085,22 @@ def fig_pe_band(ops: dict) -> plt.Figure | None:
     d = ops.get("pe_band")
     if not d:
         return None
-    labels, x = d["labels"], range(len(d["labels"]))
+    labels = d["labels"]
+    x = np.arange(len(labels))
+    pe_high = np.array([_fnum(v) for v in d["pe_high"]], dtype=float)
+    pe_low = np.array([_fnum(v) for v in d["pe_low"]], dtype=float)
+    pe_mean = np.array([_fnum(v) for v in d["pe_mean"]], dtype=float)
+    pe_ttm = np.array([_fnum(v) for v in d["pe_ttm"]], dtype=float)
     fig, ax = plt.subplots(figsize=(10, 5.5))
-    ax.fill_between(x, d["pe_low"], d["pe_high"], alpha=0.12, color="#4C72B0")
-    ax.plot(x, d["pe_high"], color="#C44E52", lw=1.5, ls="--", label="PE 高点")
-    ax.plot(x, d["pe_low"], color="#55A868", lw=1.5, ls="--", label="PE 低点")
-    ax.plot(x, d["pe_mean"], color="#8B5CF6", lw=1.8, ls="-.", label="PE 均值")
-    ax.plot(x, d["pe_ttm"], marker="o", color="#4C72B0", lw=3, markersize=9, label="PE(TTM)")
-    for i, v in enumerate(d["pe_ttm"]):
-        if v is None or (isinstance(v, float) and math.isnan(v)):
+    band = np.isfinite(pe_low) & np.isfinite(pe_high)
+    if band.any():
+        ax.fill_between(x[band], pe_low[band], pe_high[band], alpha=0.12, color="#4C72B0")
+    ax.plot(x, pe_high, color="#C44E52", lw=1.5, ls="--", label="PE 高点")
+    ax.plot(x, pe_low, color="#55A868", lw=1.5, ls="--", label="PE 低点")
+    ax.plot(x, pe_mean, color="#8B5CF6", lw=1.8, ls="-.", label="PE 均值")
+    ax.plot(x, pe_ttm, marker="o", color="#4C72B0", lw=3, markersize=9, label="PE(TTM)")
+    for i, v in enumerate(pe_ttm):
+        if not np.isfinite(v):
             continue  # TTM 亏损期 PE 无定义：不标注，折线呈 NaN 缺口（2026-08-21 牧原校准写回）
         ax.text(i, v-3.5, f"{v:.1f}x", ha="center", fontsize=9, color="#4C72B0", fontweight="bold")
     ax.set_xticks(list(x)); ax.set_xticklabels(labels)
@@ -1097,13 +1115,21 @@ def fig_pb_band(ops: dict) -> plt.Figure | None:
     d = ops.get("pb_band")
     if not d:
         return None
-    labels, x = d["labels"], range(len(d["labels"]))
+    labels = d["labels"]
+    x = np.arange(len(labels))
+    pb_high = np.array([_fnum(v) for v in d["pb_high"]], dtype=float)
+    pb_low = np.array([_fnum(v) for v in d["pb_low"]], dtype=float)
+    pb = np.array([_fnum(v) for v in d["pb"]], dtype=float)
     fig, ax = plt.subplots(figsize=(10, 5.5))
-    ax.fill_between(x, d["pb_low"], d["pb_high"], alpha=0.12, color="#DD8452")
-    ax.plot(x, d["pb_high"], color="#C44E52", lw=1.5, ls="--", label="PB 高点")
-    ax.plot(x, d["pb_low"], color="#55A868", lw=1.5, ls="--", label="PB 低点")
-    ax.plot(x, d["pb"], marker="o", color="#DD8452", lw=3, markersize=9, label="PB")
-    for i, v in enumerate(d["pb"]):
+    band = np.isfinite(pb_low) & np.isfinite(pb_high)
+    if band.any():
+        ax.fill_between(x[band], pb_low[band], pb_high[band], alpha=0.12, color="#DD8452")
+    ax.plot(x, pb_high, color="#C44E52", lw=1.5, ls="--", label="PB 高点")
+    ax.plot(x, pb_low, color="#55A868", lw=1.5, ls="--", label="PB 低点")
+    ax.plot(x, pb, marker="o", color="#DD8452", lw=3, markersize=9, label="PB")
+    for i, v in enumerate(pb):
+        if not np.isfinite(v):
+            continue
         ax.text(i, v+0.15, f"{v:.2f}x", ha="center", fontsize=9, color="#DD8452", fontweight="bold")
     ax.set_xticks(list(x)); ax.set_xticklabels(labels)
     ax.set_ylabel("PB", fontsize=11)
