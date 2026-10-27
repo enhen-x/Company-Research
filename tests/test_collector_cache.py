@@ -16,12 +16,30 @@ import pytest
 from tushare_collector import TushareClient, rate_limit
 
 
+_TEST_CACHE_DIRS = []
+
+
+def _new_cache_dir(prefix):
+    directory = tempfile.TemporaryDirectory(prefix=prefix)
+    _TEST_CACHE_DIRS.append(directory)
+    return directory.name
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_test_cache_dirs():
+    try:
+        yield
+    finally:
+        while _TEST_CACHE_DIRS:
+            _TEST_CACHE_DIRS.pop().cleanup()
+
+
 def _make_client():
     """Create a TushareClient with mocked tushare module and isolated cache."""
     with patch("tushare_collector.ts") as mock_ts:
         mock_ts.pro_api.return_value = MagicMock()
         client = TushareClient("test_token")
-    client._cache_dir = tempfile.mkdtemp(prefix="collector_cache_test_")
+    client._cache_dir = _new_cache_dir(prefix="collector_cache_test_")
     return client
 
 
@@ -267,7 +285,7 @@ class TestCachedCall:
         cache = client._get_ttl_cache()
         assert client._cache_dir in cache.cache_dir
 
-        new_dir = tempfile.mkdtemp(prefix="collector_cache_test2_")
+        new_dir = _new_cache_dir(prefix="collector_cache_test2_")
         client._cache_dir = new_dir
         cache2 = client._get_ttl_cache()
         assert new_dir in cache2.cache_dir

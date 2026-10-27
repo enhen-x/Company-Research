@@ -1,4 +1,4 @@
-﻿interface:
-  display_name: "统一证券调研"
+interface:
+  display_name: "统一证券调研 v3"
   short_description: "一句话触发公司调研：自动拉数、审计、券商深度八步分析、龟龟穿透回报率估值、评级与仓位结论"
-  default_prompt: "Use $company-research 调研 温氏股份（300498），自动拉取数据并审计，按券商深度标准结合龟龟穿透回报率估值（R*/GG/II/KK）输出评级、目标买入价与仓位建议。"
+  default_prompt: "Use $company-research-v3 调研 温氏股份（300498），按固定流水线输出 Markdown、HTML、图表、评级和目标买入价。"

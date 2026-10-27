@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "rule_version": "financial-health-v2-key-findings",
+  "market": "auto",
+  "period_policy": "yoy_primary_explainable_qoq",
+  "thresholds": {
+    "growth_gap_pp": 10.0,
+    "margin_decline_pp": 2.0,
+    "cash_conversion_floor": 80.0,
+    "cash_conversion_decline": 20.0,
+    "one_time_profit_share": 20.0,
+    "material_non_operating_share": 10.0,
+    "assetization_growth_pct": 30.0,
+    "inventory_growth_gap_pp": 10.0,
+    "bridge_residual_pct": 5.0,
+    "seasonality_pct": 80.0,
+    "seasonality_normal_pct": 60.0,
+    "ocf_decline_pct": 20.0,
+    "profit_change_pct": 20.0,
+    "financial_asset_profit_share": 10.0,
+    "financial_asset_asset_share": 5.0,
+    "financial_asset_growth_pct": 20.0
+  },
+  "industry_profile": {
+    "industry": "",
+    "cash_flow_seasonality": "unknown",
+    "inventory_review": "auto",
+    "financial_asset_review": "auto",
+    "cash_flow_note": "",
+    "inventory_note": "",
+    "overrides": {}
+  },
+  "filing_policy": {
+    "prefer_current_period": true,
+    "extensions": [".pdf", ".txt", ".html"],
+    "max_excerpts": 12
+  },
+  "data_source_policy": {
+    "required": ["利润表_按报告期.csv", "资产负债表_按报告期.csv", "现金流量表_按报告期.csv"],
+    "optional": ["主要财务指标_按报告期.csv", "主要财务指标_按单季度.csv", "财报附注或PDF"],
+    "evidence_level": "L3",
+    "independent_cross_validation": "仅存在独立数据生产方交叉验证时标记L4"
+  },
+  "notes_policy": "three_statements_required_notes_enhance"
+}

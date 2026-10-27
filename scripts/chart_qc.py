@@ -26,6 +26,7 @@ fetch_industry_cost_price.py 的 CSV 契约审计，且有 cost+price 双序列�
 """
 from __future__ import annotations
 
+import time
 import argparse
 import json
 import math
@@ -68,6 +69,27 @@ _SECTION_KEYS = [
 FIG_SECTION = {k: v[0] for k, v in FIG_MAP.items()}
 
 
+def _chart_exemptions(project: Path) -> set[str]:
+    """Only explicit, nonempty reasons exempt missing charts; supplied data is checked."""
+    path = project / "input/图表豁免.json"
+    if not path.exists():
+        return set()
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    entries = payload.get("豁免") if isinstance(payload, dict) else None
+    if not isinstance(entries, list):
+        raise ValueError("图表豁免必须为列表")
+    found = set()
+    for entry in entries:
+        if (not isinstance(entry, dict) or not isinstance(entry.get("原因"), str)
+                or not entry["原因"].strip() or not isinstance(entry.get("图"), str)):
+            raise ValueError("每项图表豁免须有原因")
+        label = str(entry.get("图", "")).split("_")[0]
+        if label not in {f"图{i:02d}" for i in FIG_MAP}:
+            raise ValueError(f"未知图号：{label}")
+        found.add(label)
+    return found
+
+
 def _section_no_of(heading: str) -> int | None:
     for key, no in _SECTION_KEYS:
         if key in heading:
@@ -105,15 +127,21 @@ def _split_cells(line: str) -> list[str]:
     return parts
 
 
-def check_listing_vs_embed(md_lines: list[str]) -> list[str]:
+def check_listing_vs_embed(md_lines: list[str], project: Path | None = None) -> list[str]:
     """附录图表清单（| 图NN | 内容 | 位置 |）标注的章节 vs 实际嵌入章节必须一致。"""
     issues = []
+    project = Path(project) if project is not None else Path(__file__).resolve().parents[1]
     _exempt = set()
     try:
-        _ex_f = Path(__file__).resolve().parents[1] / "input" / "图表豁免.json"
-        if _ex_f.exists():
-            for _e in json.loads(_ex_f.read_text(encoding="utf-8")).get("豁免", []):
-                _exempt.add(str(_e.get("图", "")).split("_")[0])
+        _exempt = _chart_exemptions(project)
+    except (OSError, ValueError):
+        issues.append("input/图表豁免.json 无效")
+    # SOTP is optional when platform detection is disabled. Treat an appendix
+    # row for the skipped Figure 18 as non-embeddable, matching the main gate.
+    try:
+        _sotp = project / "input" / "sotp_触发.json"
+        if _sotp.exists() and json.loads(_sotp.read_text(encoding="utf-8-sig")).get("enabled") is False:
+            _exempt.add("图18")
     except Exception:
         pass
     listing = {}
@@ -172,26 +200,20 @@ def check_markdown_tables(md_lines: list[str]) -> list[str]:
 
 
 def _find_json_by_keys(project: Path, required: set[str]) -> dict | None:
-    """Find the first input JSON containing all required keys."""
+    """Find an input JSON containing all required keys.
+
+    The operational supplement is the primary chart input. Prefer it when
+    several input files expose the same contract, while still allowing model
+    assumptions to provide contracts absent from the chart input.
+    """
     input_dir = project / "input"
     if not input_dir.exists():
         return None
-    for p in sorted(input_dir.glob("*.json")):
-        try:
-            obj = json.loads(p.read_text(encoding="utf-8-sig"))
-        except Exception:
-            continue
-        if isinstance(obj, dict) and required.issubset(obj.keys()):
-            return obj
-    return None
-
-
-def _find_json_by_keys(project: Path, required: set[str]) -> dict | None:
-    """Find the first input JSON containing all required keys."""
-    input_dir = project / "input"
-    if not input_dir.exists():
-        return None
-    for p in sorted(input_dir.glob("*.json")):
+    preferred = input_dir / "运营补充数据.json"
+    candidates = ([preferred] if preferred.exists() else []) + [
+        p for p in sorted(input_dir.glob("*.json")) if p != preferred
+    ]
+    for p in candidates:
         try:
             obj = json.loads(p.read_text(encoding="utf-8-sig"))
         except Exception:
@@ -202,7 +224,7 @@ def _find_json_by_keys(project: Path, required: set[str]) -> dict | None:
 
 
 def check_sensitivity_contract(project: Path, report_text: str) -> tuple[list[str], list[str]]:
-    """G8-SENS: validate Figure 11 has an informative, correctly labelled series."""
+    """G8-SENS: validate Figure 11 data, axis semantics, and flat-line disclosure."""
     warnings, failures = [], []
     fig11 = chr(22270) + "11"
     chart_dir_name = chr(22270) + chr(34920)
@@ -237,6 +259,8 @@ def check_sensitivity_contract(project: Path, report_text: str) -> tuple[list[st
     if not numeric_list(x):
         failures.append("G8-SENS: x contains non-numeric or NaN/Inf values")
     x_span = max(map(float, x)) - min(map(float, x)) if numeric_list(x) else 0.0
+    sensitivity_disclosure = " ".join(str(v) for v in (
+        sensitivity.get("注", ""), sensitivity.get("note", "")))
     for idx, item in enumerate(series):
         if not isinstance(item, dict) or not isinstance(item.get("y"), list):
             failures.append(f"G8-SENS: series {idx + 1} has no y sequence")
@@ -250,18 +274,32 @@ def check_sensitivity_contract(project: Path, report_text: str) -> tuple[list[st
             continue
         y_span = max(map(float, y)) - min(map(float, y))
         mode = str(sensitivity.get("mode", "")).lower()
-        explicit_manual = mode in {"manual_cash_surplus", "manual", "not_applicable"}
-        if x_span > 1e-9 and y_span <= 1e-9 and not explicit_manual:
-            failures.append(
-                f"G8-SENS: series {idx + 1} is flat while x varies (x_span={x_span:g}); "
-                "fix the calculation or explicitly declare manual/not_applicable"
-            )
+        disclosure = " ".join(str(v) for v in (item.get("name", ""), sensitivity_disclosure))
+        explicit_manual = (
+            mode in {"manual_cash_surplus", "manual", "not_applicable"}
+            or re.search(r"lambda\s*=\s*0|λ\s*=\s*0|未建模|未映射|水平线|平线|手算|手工|补充|降级", disclosure, re.I)
+        )
+        if x_span > 1e-9 and y_span <= 1e-9:
+            if not explicit_manual:
+                failures.append(
+                    f"G8-SENS: series {idx + 1} is flat while x varies (x_span={x_span:g}); "
+                    "fix the calculation or disclose lambda=0/unmodeled/manual supplemental semantics"
+                )
+            else:
+                warnings.append(f"G8-SENS: series {idx + 1} is flat while x varies, but the input declares a degraded/unmodeled supplemental mode")
 
     model = _find_json_by_keys(project, {"lambda"})
     xlabel = str(sensitivity.get("xlabel", "")).lower()
     mode = str(sensitivity.get("mode", "")).lower()
     income_marker = chr(25910) + chr(20837)
-    if model is not None and float(model.get("lambda", 0) or 0) == 0:
+    lambda_zero = False
+    if model is not None:
+        try:
+            lambda_zero = float(model.get("lambda", 0) or 0) == 0
+        except (TypeError, ValueError):
+            pass
+    lambda_zero = lambda_zero or bool(re.search(r"lambda\s*=\s*0|λ\s*=\s*0", sensitivity_disclosure, re.I))
+    if lambda_zero:
         if ("revenue" in xlabel or "income" in xlabel or income_marker in xlabel) and mode not in {"manual_cash_surplus", "manual", "not_applicable"}:
             failures.append("G8-SENS: lambda=0 but Figure 11 is still labelled as a revenue multiple")
         if mode in {"manual_cash_surplus", "manual"}:
@@ -418,33 +456,167 @@ def _check_fig16_render(project: Path) -> tuple[list[str], list[str]]:
         warnings.append(f"G8-INDUSTRY: 图16 渲染级检查异常（{exc}），需人工复核断点与刻度重合")
     return warnings, failures
 
+def _load_ops(path: Path) -> dict:
+    """Read a bounded JSON object before inspecting chart-specific structures."""
+    limit = 10 * 1024 * 1024
+    if path.stat().st_size > limit:
+        raise ValueError("运营输入超过 10 MiB 上限")
+    with path.open("rb") as stream:
+        raw = stream.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError("运营输入超过 10 MiB 上限")
+    ops = json.loads(raw.decode("utf-8-sig"))
+    if not isinstance(ops, dict):
+        raise ValueError("运营输入顶层必须是对象")
+    return ops
+
+
+def _ops_shape_errors(ops: dict) -> list[str]:
+    """Reject malformed containers so QC reports a failure without a traceback."""
+    errors = []
+    sections = {
+        "segment": ("labels", "series"),
+        "forecast": ("labels_hist", "labels_fcast", "np_hist", "悲观", "基准", "乐观"),
+        "sensitivity": ("x", "系列"),
+        "pe_band": ("labels", "pe_high", "pe_low", "pe_ttm", "pe_mean"),
+        "pb_band": ("labels", "pb_high", "pb_low", "pb"),
+        "cashflow": ("labels", "OCF", "Capex", "FCF"),
+        "profitability": ("labels", "毛利率", "净利率", "ROE"),
+        "dps": ("labels", "dps", "支付率"),
+        "leverage": ("labels", "资产负债率", "有息负债率", "净现金"),
+        "targets": ("labels", "values"),
+        "penetration": ("labels", "gg"),
+    }
+    for key, arrays in sections.items():
+        value = ops.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, dict):
+            errors.append(f"{key} 必须是对象")
+            continue
+        for field in arrays:
+            if value.get(field) is not None and not isinstance(value[field], list):
+                errors.append(f"{key}.{field} 必须是列表")
+    for key, series_key, values_key in (("segment", "series", "values"), ("sensitivity", "系列", "y")):
+        section = ops.get(key)
+        if not isinstance(section, dict):
+            continue
+        series = section.get(series_key)
+        if isinstance(series, list):
+            for index, row in enumerate(series):
+                if not isinstance(row, dict):
+                    errors.append(f"{key}.{series_key}[{index}] 必须是对象")
+                elif row.get(values_key) is not None and not isinstance(row[values_key], list):
+                    errors.append(f"{key}.{series_key}[{index}].{values_key} 必须是列表")
+        if key == "segment" and section.get("增速") is not None:
+            growth = section["增速"]
+            if not isinstance(growth, dict):
+                errors.append("segment.增速 必须是对象")
+            elif growth.get("合计增速") is not None and not isinstance(growth["合计增速"], list):
+                errors.append("segment.增速.合计增速 必须是列表")
+    return errors
+
+
 def check_ops_contract(project: Path) -> tuple[list[str], list[str]]:
     """G8-OPS: 运营图表数据契约检查（2026-08-18 新增，牧原批次反馈）。
 
-    防四类静默失败：①ops 键名与模板期望不符导致数据被丢弃（如 leverage 提供
-    '有息负债' 但模板只识别 '有息负债率'）；②图数据序列长度与 labels 不一致；
-    ③同行图在亏损期 PE 全部缺失导致空子图；④同行增速面板数据点不足（图06 右面板近空）或必需图 PNG 缺失未豁免。向后兼容：缺数据仅 WARN，仅
-    'peers 无 PE 且无 PB'（必然空图）判 FAIL。
+    防五类静默失败：①ops 键名与模板期望不符导致数据被丢弃；②图数据序列长度与
+    labels 不一致；③杠杆比率/单位/缺失值语义错误；④敏感性图出现未解释的水平线；
+    ⑤同行图在亏损期 PE 全部缺失导致空子图。缺失数据只有在明确披露口径时才允许
+    继续，否则 FAIL。
     """
     warnings, failures = [], []
+    try:
+        exempt = _chart_exemptions(project)
+    except (OSError, ValueError):
+        exempt = set()
+        failures.append("G8-OPS: 图表豁免配置无效")
     for fname in ("input/运营补充数据.json", "input/模型假设.json"):
         ops_path = project / fname
         if not ops_path.exists():
             continue
         try:
-            ops = json.loads(ops_path.read_text(encoding="utf-8"))
+            ops = _load_ops(ops_path)
         except Exception as exc:
-            warnings.append(f"G8-OPS: 读取 {fname} 失败: {exc}")
+            failures.append(f"G8-OPS: 读取 {fname} 失败: {exc}")
+            continue
+        shape_errors = _ops_shape_errors(ops)
+        if shape_errors:
+            failures.extend(f"G8-OPS: {fname}: {error}" for error in shape_errors)
             continue
         lev = ops.get("leverage")
         if lev:
             for k in ("资产负债率", "净现金"):
                 if k not in lev:
-                    warnings.append(f"G8-OPS: leverage 缺少模板必需键 {k}（fig_leverage 将跳过该序列）")
+                    failures.append(f"G8-OPS: leverage 缺少模板必需键 {k}——图15 无法形成完整杠杆/净现金图")
             if "有息负债" in lev and "有息负债率" not in lev:
-                warnings.append("G8-OPS: leverage 含'有息负债'但缺'有息负债率'——fig_leverage 只识别'有息负债率'，该数据被静默丢弃，请换算为比率键")
+                failures.append("G8-OPS: leverage 含'有息负债'但缺'有息负债率'——请提供有息负债/总资产比率，禁止把金额误当比率")
+            for ratio_key in ("资产负债率", "有息负债率"):
+                seq = lev.get(ratio_key)
+                if seq is None:
+                    continue
+                if not isinstance(seq, list):
+                    failures.append(f"G8-OPS: leverage.{ratio_key} 必须是列表（单位为百分比）")
+                    continue
+                finite = []
+                for idx, value in enumerate(seq):
+                    if value is None:
+                        continue
+                    try:
+                        value = float(value)
+                    except (TypeError, ValueError):
+                        failures.append(f"G8-OPS: leverage.{ratio_key}[{idx}] 不是数值")
+                        continue
+                    if not math.isfinite(value):
+                        failures.append(f"G8-OPS: leverage.{ratio_key}[{idx}] 为 NaN/Inf")
+                    elif value < 0 or value > 100:
+                        failures.append(f"G8-OPS: leverage.{ratio_key}[{idx}]={value:g}% 超出 0-100% 合理范围——疑似金额/现金分母口径错误")
+                    else:
+                        finite.append(value)
+                if not finite:
+                    warnings.append(f"G8-OPS: leverage.{ratio_key} 无有效比率值——对应曲线为空")
+            cash_seq = lev.get("净现金")
+            if isinstance(cash_seq, list) and any(v is None for v in cash_seq):
+                disclosure = " ".join(str(lev.get(k, "")) for k in ("注", "净现金注"))
+                if not re.search(r"缺失|未披露|不可得|不完整|NA|None", disclosure, re.I):
+                    failures.append("G8-OPS: leverage.净现金含缺失值但没有在注释中披露——禁止静默补零或绘制为负值")
+            if "净现金单位" not in lev:
+                warnings.append("G8-OPS: leverage 缺少净现金单位（建议显式提供‘亿元RMB’等单位，防止百万元/亿元错标）")
+        # The operational supplement is the main chart input and must carry
+        # peers. A model-assumption file may omit peers unless it declares them.
         peers = ops.get("peers")
-        if peers:
+        should_check_peers = fname == "input/运营补充数据.json" or "peers" in ops
+        if "图06" in exempt and (peers is None or peers == []):
+            should_check_peers = False
+        if should_check_peers and (not isinstance(peers, list) or not peers):
+            failures.append("G8-OPS: peers 缺失或为空——图06 同行估值与增长对比没有可审计数据")
+        elif should_check_peers and any(not isinstance(row, dict) for row in peers):
+            failures.append("G8-OPS: peers 每行必须为对象")
+        elif should_check_peers:
+            # 图06 必须显式声明且仅声明一个标的公司；不能依赖名称猜测或旧版“高亮”字段。
+            targets = [p for p in peers if p.get("标的") is True or p.get("target") is True]
+            if len(targets) == 0:
+                failures.append("G8-OPS: peers 缺少唯一标的标记（请在目标公司行设置 标的=true；禁止用高亮字段代替）")
+            elif len(targets) > 1:
+                failures.append(f"G8-OPS: peers 标的标记数量为 {len(targets)}，必须恰好 1 个")
+            else:
+                target = targets[0]
+                missing = [k for k in ("公司", "PB", "ROE", "营收增速", "净利增速")
+                           if target.get(k) is None]
+                if missing:
+                    failures.append(f"G8-OPS: 图06 标的公司 {target.get('公司', '?')} 缺少字段 {','.join(missing)}——疑似目标公司数据缺失")
+                elif target.get("PE") is None:
+                    warnings.append(f"G8-OPS: 图06 标的公司 {target.get('公司', '?')} PE 无定义，将使用 PB vs ROE；请在报告说明盈利口径")
+                declared = ops.get("target")
+                if isinstance(declared, dict):
+                    for k in ("公司", "代码"):
+                        if declared.get(k) and target.get(k) and str(declared[k]) != str(target[k]):
+                            failures.append(f"G8-OPS: 顶层 target.{k}={declared[k]} 与 peers 标的行 {target.get(k)} 不一致")
+            # 同行行不能重复同一公司，避免目标公司被追加后仍有旧行覆盖/错标。
+            names = [str(p.get("公司", "")).strip() for p in peers]
+            dup_names = sorted({n for n in names if n and names.count(n) > 1})
+            if dup_names:
+                failures.append(f"G8-OPS: peers 存在重复公司行 {','.join(dup_names)}——请保留一行并明确标的身份")
             pe_pos = [p.get("PE") for p in peers if isinstance(p.get("PE"), (int, float)) and p.get("PE", 0) > 0]
             has_pb = any(p.get("PB") is not None for p in peers)
             if len(pe_pos) < 3:
@@ -462,10 +634,10 @@ def check_ops_contract(project: Path) -> tuple[list[str], list[str]]:
         seg = ops.get("segment")
         if seg:
             labels = seg.get("labels") or []
-            for s in seg.get("series", []):
-                if len(s.get("values", [])) != len(labels):
-                    warnings.append(f"G8-OPS: segment 系列 {s.get('name')} 长度 {len(s.get('values', []))} != labels {len(labels)}")
-            g = seg.get("增速", {}).get("合计增速")
+            for s in seg.get("series") or []:
+                if len(s.get("values") or []) != len(labels):
+                    warnings.append(f"G8-OPS: segment 系列 {s.get('name')} 长度 {len(s.get('values') or [])} != labels {len(labels)}")
+            g = (seg.get("增速") or {}).get("合计增速")
             if g and len(g) != len(labels):
                 warnings.append(f"G8-OPS: segment 合计增速长度 {len(g)} != labels {len(labels)}")
         # 通用图契约：label 键 + 数值键 长度/有限值检查（数值序列全空 → 空子图）
@@ -491,7 +663,13 @@ def check_ops_contract(project: Path) -> tuple[list[str], list[str]]:
                     if len(seq) != len(lab):
                         warnings.append(f"G8-OPS: {key}.{k} 长度 {len(seq)} != {label_key} {len(lab)}")
                     if seq:
-                        vals = [v for v in seq if isinstance(v, (int, float)) and str(v) not in ("nan", "None")]
+                        vals = []
+                        for v in seq:
+                            try:
+                                if v is not None and math.isfinite(float(v)):
+                                    vals.append(float(v))
+                            except (TypeError, ValueError):
+                                continue
                         if not vals:
                             warnings.append(f"G8-OPS: {key}.{k} 全为空值/NaN——对应图将空子图或失真")
         fc = ops.get("forecast")
@@ -502,8 +680,8 @@ def check_ops_contract(project: Path) -> tuple[list[str], list[str]]:
                 warnings.append(f"G8-OPS: forecast.np_hist 长度 {len(fc.get('np_hist') or [])} != labels_hist {len(lh)}")
             for k in ("悲观", "基准", "乐观"):
                 if k in fc:
-                    if len(fc[k]) != len(lf):
-                        warnings.append(f"G8-OPS: forecast.{k} 长度 {len(fc[k])} != labels_fcast {len(lf)}")
+                    if len(fc[k] or []) != len(lf):
+                        warnings.append(f"G8-OPS: forecast.{k} 长度 {len(fc[k] or [])} != labels_fcast {len(lf)}")
                     if fc[k]:
                         vals = [v for v in fc[k] if isinstance(v, (int, float)) and str(v) not in ("nan", "None")]
                         if not vals:
@@ -511,13 +689,93 @@ def check_ops_contract(project: Path) -> tuple[list[str], list[str]]:
         sens = ops.get("sensitivity")
         if sens:
             x = sens.get("x") or []
-            for ser in sens.get("系列", []):
+            x_values = []
+            for value in x:
+                try:
+                    if math.isfinite(float(value)):
+                        x_values.append(float(value))
+                except (TypeError, ValueError):
+                    continue
+            if len(x_values) < 2 or len(set(x_values)) < 2:
+                failures.append("G8-SENS: 图11 x 轴必须至少有两个不同的有限数值")
+            for ser in sens.get("系列") or []:
                 y = ser.get("y") or []
                 if len(y) != len(x):
                     failures.append(f"G8-OPS: sensitivity 系列 {ser.get('name')} 长度 {len(y)} != x {len(x)}——图11 将断裂或错位")
-                fin = [v for v in y if isinstance(v, (int, float)) and str(v) not in ("nan", "None")]
+                fin = []
+                for value in y:
+                    try:
+                        if value is not None and math.isfinite(float(value)):
+                            fin.append(float(value))
+                    except (TypeError, ValueError):
+                        continue
                 if y and not fin:
                     failures.append(f"G8-OPS: sensitivity 系列 {ser.get('name')} 全为空值/NaN——图11 空子图")
+    return warnings, failures
+
+
+def check_valuation_band_contract(project: Path) -> tuple[list[str], list[str]]:
+    """G8-VALUATION-BAND: 估值带必须是逐时点区间，而非全历史常数复制。
+
+    旧版项目把全历史 max/min/mean 复制到每个年份，图形看似有阴影，实际没有
+    估值区间随时间变化。PE校验low <= mean <= high；PB的pb为实际市场值，
+    可以越过滚动分位带（突破本身就是有效信息），只校验low <= high。
+    """
+    warnings, failures = [], []
+    path = project / "input" / "运营补充数据.json"
+    if not path.exists():
+        return warnings, failures
+    try:
+        ops = _load_ops(path)
+    except Exception as exc:
+        return warnings, [f"G8-VALUATION-BAND: 无法读取运营补充数据: {exc}"]
+    shape_errors = _ops_shape_errors(ops)
+    if shape_errors:
+        return warnings, [f"G8-VALUATION-BAND: {error}" for error in shape_errors]
+    specs = {
+        "pe_band": ("PE", ("pe_low", "pe_mean", "pe_high")),
+        "pb_band": ("PB", ("pb_low", "pb", "pb_high")),
+    }
+    for key, (label, fields) in specs.items():
+        d = ops.get(key)
+        if not d:
+            continue
+        labels = d.get("labels") or []
+        arrays = {f: d.get(f) for f in fields}
+        if any(not isinstance(v, list) for v in arrays.values()):
+            failures.append(f"G8-VALUATION-BAND: {key} 缺少完整区间字段 {','.join(fields)}")
+            continue
+        if any(len(v) != len(labels) for v in arrays.values()):
+            failures.append(f"G8-VALUATION-BAND: {key} 区间字段长度与 labels 不一致")
+            continue
+        rows = []
+        for i in range(len(labels)):
+            vals = []
+            for f in fields:
+                try:
+                    x = float(arrays[f][i])
+                except (TypeError, ValueError):
+                    x = float("nan")
+                vals.append(x)
+            rows.append(vals)
+        valid = [r for r in rows if all(np.isfinite(x) for x in r)]
+        if len(valid) < 3:
+            warnings.append(f"G8-VALUATION-BAND: {key} 有效时点仅 {len(valid)} 个，无法确认历史区间变化")
+            continue
+        bad_order = [i for i, r in enumerate(rows) if all(np.isfinite(x) for x in r)
+                     and not (r[0] <= r[2] if key == "pb_band" else r[0] <= r[1] <= r[2])]
+        if bad_order:
+            order_rule = "low <= high" if key == "pb_band" else "low <= mean <= high"
+            failures.append(f"G8-VALUATION-BAND: {key} 存在 {order_rule} 违反的时点（索引 {bad_order[:5]}）")
+        low_values = {round(r[0], 8) for r in valid}
+        mid_values = {round(r[1], 8) for r in valid}
+        high_values = {round(r[2], 8) for r in valid}
+        if len(low_values) == 1 and len(high_values) == 1:
+            failures.append(f"G8-VALUATION-BAND: {label} 高低边界在全部时点恒定——疑似把全历史 max/min 复制到每年")
+        elif len(low_values) == 1 or len(high_values) == 1:
+            warnings.append(f"G8-VALUATION-BAND: {label} 仅一侧边界变化，确认是否为真实数据口径")
+        if len(mid_values) == 1:
+            warnings.append(f"G8-VALUATION-BAND: {label} 中枢在全部时点恒定，确认是否误用了全历史均值")
     return warnings, failures
 
 
@@ -527,9 +785,17 @@ def check_report(report_md: Path, html_path: Path | None, chart_dir: Path,
     warnings, failures = [], []
     text = report_md.read_text(encoding="utf-8")
     md_lines = text.splitlines()
+    exempt = set()
+    try:
+        exempt = _chart_exemptions(report_md.parents[1])
+    except (OSError, ValueError):
+        failures.append("input/图表豁免.json 无法解析")
 
     # 1) PNG 存在性 + 引用一致性
     png_files = {p.stem for p in chart_dir.glob("图*.png")} if chart_dir.exists() else set()
+    for png_stem in png_files:
+        if png_stem.split("_")[0] in exempt:
+            failures.append(f"已豁免图仍有PNG，须明确处理旧产物：{png_stem}.png")
     refs = re.findall(r"!\[图(\d{2})[^\]]*\]\(图表/([^)]+\.png)\)", text)
     ref_fig_nos, ref_fnames = [int(a) for a, _ in refs], [b for _, b in refs]
     # SOTP 触发状态（平台型公司 → 图18 强制）
@@ -541,6 +807,8 @@ def check_report(report_md: Path, html_path: Path | None, chart_dir: Path,
         pass
     for no in sorted(FIG_MAP):
         if no in (17,):
+            continue
+        if f"图{no:02d}" in exempt:
             continue
         if no == 18 and not sotp_trig:
             continue  # 非平台型公司：图18 可选，不强制
@@ -608,39 +876,36 @@ def check_report(report_md: Path, html_path: Path | None, chart_dir: Path,
     # 3.1) 交互 HTML 面板检查（Plotly 交互图 reports/<公司>_<代码>_图表.html，trace ≥1）
     inter_htms = sorted(chart_dir.parent.glob("*_图表.html")) if chart_dir.parent.exists() else []
     if not inter_htms:
-        warnings.append("缺少 Plotly 交互图表 HTML（reports/<公司>_<代码>_图表.html）")
+        failures.append("缺少 Plotly 交互图表 HTML（reports/<公司>_<代码>_图表.html）")
     for ih in inter_htms:
         ih_text = ih.read_text(encoding="utf-8")
-        n_panels = len(re.findall(r'"type":\s*"(bar|scatter|scattergl|line|histogram)"', ih_text))
+        n_panels = len(re.findall(r'class=["\'][^"\']*\bplotly-graph-div\b', ih_text))
         if n_panels == 0:
-            warnings.append(f"交互 HTML 未检测到图表面板（可能为空模板）: {ih.name}")
+            failures.append(f"交互 HTML 未检测到图表面板（可能为空模板）: {ih.name}")
         else:
             print(f"[HTML] 交互图面板数: {ih.name} = {n_panels}")
     # 3.5) 运营图表数据契约（G8-OPS）
+    sw, sfail = check_sensitivity_contract(report_md.parent.parent, text)
+    warnings.extend(sw); failures.extend(sfail)
     ow, ofail = check_ops_contract(report_md.parent.parent)
     warnings.extend(ow); failures.extend(ofail)
+    vw, vfail = check_valuation_band_contract(report_md.parent.parent)
+    warnings.extend(vw); failures.extend(vfail)
+    from chart_period_qc import check_chart_periods
+    pw, pfail = check_chart_periods(report_md.parent.parent)
+    warnings.extend(pw); failures.extend(pfail)
     # 4) Markdown 表格结构
     failures.extend(check_markdown_tables(md_lines))
     iw, ifail = check_industry_contract(report_md.parent.parent, text)
     warnings.extend(iw); failures.extend(ifail)
-    gw, gf = _check_all_xticks(chart_dir.parents[1])
-    warnings.extend(gw); failures.extend(gf)
     rw, rf = _check_render_quality(chart_dir.parents[1])
     warnings.extend(rw); failures.extend(rf)
 
     # 4.1) 附录图表清单 vs 实际嵌入位置
-    failures.extend(check_listing_vs_embed(md_lines))
+    failures.extend(check_listing_vs_embed(md_lines, report_md.parent.parent))
 
     # 4.2) 图表完整性：图01-15 PNG 必须存在；图16/17 需在 input/图表豁免.json 声明（禁止静默跳过）
     proj_root = chart_dir.parents[1]  # 批次根目录（chart_dir = reports/图表）
-    exempt = set()
-    ex_f = proj_root / "input" / "图表豁免.json"
-    if ex_f.exists():
-        try:
-            for e in json.loads(ex_f.read_text(encoding="utf-8")).get("豁免", []):
-                exempt.add(str(e.get("图", "")).split("_")[0])
-        except Exception:
-            pass
     for no in range(1, 16):
         if list(chart_dir.glob(f"图{no:02d}_*.png")):
             continue
@@ -660,6 +925,8 @@ def check_report(report_md: Path, html_path: Path | None, chart_dir: Path,
     for no in sorted(FIG_MAP):
         if no == 17:
             continue
+        if f"图{no:02d}" in exempt:
+            continue
         if f"| 图{no:02d} " not in text:
             sec, fname_cn = FIG_MAP.get(no, (None, ""))
             warnings.append(f"附录图表清单缺少 图{no:02d} 行（预置占位：| 图{no:02d} | 图表/图{no:02d}_*.png | §{sec or chr(8212)} | {fname_cn} |，报告模板附录 10.4 应预置全部图号行）")
@@ -670,6 +937,8 @@ def check_report(report_md: Path, html_path: Path | None, chart_dir: Path,
         for i, src_line in enumerate(ac.read_text(encoding="utf-8").splitlines()):
             if "→ §" in src_line and ("set_title(" in src_line or "suptitle(" in src_line) and "图" not in src_line:
                 warnings.append(f"analyze_charts.py L{i+1}: 标题含章节指向但缺图号: {src_line.strip()[:60]}")
+            if re.search(r"d\.get\(.*?\)\s*\+\s*[\"']\s*→\s*§", src_line):
+                failures.append(f"analyze_charts.py L{i+1}: 数据标题直接追加章节后缀，可能生成重复箭头——请使用 _section_title()")
     return warnings, failures
 
 
@@ -806,6 +1075,24 @@ def _render_text_overlap(a, b) -> bool:
     return ix > 0 and iy > 0
 
 
+
+def _check_figure_xticks(fig, label):
+    """Inspect final rendered geometry; shared by legacy and combined render checks."""
+    warnings, failures = [], []
+    renderer = fig.canvas.get_renderer()
+    for ax in fig.axes:
+        visible = [lb for lb in ax.get_xticklabels() if lb.get_visible() and lb.get_text().strip()]
+        if len(visible)>14:
+            warnings.append(f"G8: {label} 横坐标刻度过多（{len(visible)} 个），存在重合风险")
+        previous = None
+        for lb in visible:
+            extent = lb.get_window_extent(renderer)
+            if previous is not None and extent.x0 < previous.x1-.5:
+                failures.append(f"G8: {label} 横坐标刻度文字重合（{lb.get_text()}），须稀疏刻度/旋转")
+                break
+            previous = extent
+    return warnings, failures
+
 def _check_render_quality(project: Path) -> tuple[list[str], list[str]]:
     """G8-RENDER 渲染级门控（2026-08-18 新增，平安批次校准；2026-08-18 v2 扩展）：
     ① 数据标注越界（transData 文本超出坐标区 >2px）→ FAIL；
@@ -822,6 +1109,7 @@ def _check_render_quality(project: Path) -> tuple[list[str], list[str]]:
     保证门控校验的图 = 实际保存的 PNG。
     """
     warnings, failures = [], []
+    timings = []
     script = project / "scripts" / "analyze_charts.py"
     if not script.exists():
         return warnings, failures
@@ -839,6 +1127,7 @@ def _check_render_quality(project: Path) -> tuple[list[str], list[str]]:
         ind = mod.load_industry_cost_price(data_dir)
         if ind and "industry_cost_price" not in ops:
             ops["industry_cost_price"] = ind
+        mod.configure_latest(data_dir)
         pl_raw = mod.load_csv(data_dir, "利润表_按报告期.csv")
         fi_raw = mod.load_csv(data_dir, "主要财务指标_按报告期.csv")
         div = mod.load_csv(data_dir, "分红送配记录.csv")
@@ -862,10 +1151,16 @@ def _check_render_quality(project: Path) -> tuple[list[str], list[str]]:
             ("图15", lambda: mod.fig_leverage(ops)),
             ("图16", lambda: mod.fig_industry_cost_price(ops, data_dir)),
         ]
-        for label, fn in jobs:
+        exempt = _chart_exemptions(project)
+        for index, (label, fn) in enumerate(jobs, 1):
+            if label in exempt:
+                continue
+            tick = time.monotonic()
+            print(f"[G8-RENDER] {index}/{len(jobs)} {label}：构图、刻度和布局检查", flush=True)
             try:
                 fig = fn()
-            except Exception:
+            except Exception as exc:
+                failures.append(f"G8-RENDER: {label} 无法重建：{exc}")
                 continue
             if fig is None:
                 continue
@@ -877,6 +1172,30 @@ def _check_render_quality(project: Path) -> tuple[list[str], list[str]]:
                 if hasattr(mod, "_auto_height"):
                     mod._auto_height(fig)   # 与保存渲染一致（G8-RENDER 高度自适应）
                 renderer = fig.canvas.get_renderer()
+                xw, xf = _check_figure_xticks(fig, label)
+                warnings.extend(xw); failures.extend(xf)
+                if getattr(fig,'_year_grouped',False):
+                    from financial_history_charts import growth_line_evidence, growth_line_failures
+                    from chart_numbers import valid_number_label
+                    failures.extend(f'G8-RENDER: {label} {message}' for message in
+                                    growth_line_failures(mod.LATEST_PACK,label,growth_line_evidence(fig),ops))
+                    for ax in fig.axes:
+                        if hasattr(ax,'_history_twin'):
+                            ticks=[t.get_text() for t in ax._history_twin.get_yticklabels() if t.get_visible()]
+                            if any(not valid_number_label(t) for t in ticks) or len(ticks)!=len(set(ticks)):
+                                failures.append(f'G8-RENDER: {label} 年度同比轴刻度超过两位小数或舍入后重复')
+                if hasattr(fig,'_layout_audit'):
+                    audit=getattr(fig,'_layout_audit',{})
+                    if (audit.get('number_format')!={'max_decimal_places':2,'small_nonzero':'inequality','trim_trailing_zeros':True}
+                        or audit.get('number_format_violations') != []):
+                        failures.append(f'G8-RENDER: {label} 数字格式未审计或实际图中文字超过2位小数')
+                    if getattr(fig,'_year_grouped',False) and any(c.get('number_format_valid') is not True or c.get('text_matches_values') is not True for c in audit.get('bar_label_counts',{}).values()):
+                        failures.append(f'G8-RENDER: {label} 柱值标注超过2位小数、非零误标为0或显示值不符')
+                    gaps=[audit.get('header_gap_pt'),audit.get('footer_gap_pt'),*audit.get('row_gaps_pt',[])]
+                    gaps=[v for v in gaps if v is not None]
+                    if (not audit.get('measured') or audit.get('annotation_collisions',[]) != [] or audit.get('text_collisions',[]) != [] or audit.get('text_out_of_bounds',[]) != [] or
+                        any(not isinstance(v,(float,int)) or not 3<=v<=26 for v in gaps)):
+                        failures.append(f'G8-RENDER: {label} 实际重建的柱值/图例/子图/脚注布局不合格：{audit}')
                 # ⑥ axes 占位比例（按唯一 position 去重，twinx 共享位置只检一次）
                 seen_pos = set()
                 pos_list = []
@@ -895,15 +1214,14 @@ def _check_render_quality(project: Path) -> tuple[list[str], list[str]]:
                     groups = [pos_list]
                 else:
                     groups = []
-                    cur = [pos_list[0]]
-                    for ab in pos_list[1:]:
-                        same_col = abs(ab.x0 - cur[0].x0) < 5 and abs(ab.width - cur[0].width) < 5
-                        if same_col:
-                            cur.append(ab)
+                    # Grid axes are row-major: group complete columns, not only
+                    # adjacent axes (latest-period segment donuts may span rows).
+                    for ab in pos_list:
+                        group = next((g for g in groups if abs(ab.x0 - g[0].x0) < 5 and abs(ab.width - g[0].width) < 5), None)
+                        if group is None:
+                            groups.append([ab])
                         else:
-                            groups.append(cur)
-                            cur = [ab]
-                    groups.append(cur)
+                            group.append(ab)
                 for g in groups:
                     top = max(ab.y1 for ab in g); bot = min(ab.y0 for ab in g)
                     if fh > 0:
@@ -1037,8 +1355,13 @@ def _check_render_quality(project: Path) -> tuple[list[str], list[str]]:
                                     f"G8-RENDER: {label} 轴标题与图例重叠（{ttl!r}）——子图标题勿用 set_title 置于图例区域，改环心标注/图题合并")
             finally:
                 plt.close(fig)
+                elapsed = round(time.monotonic()-tick, 3)
+                timings.append({"chart":label, "elapsed_seconds":elapsed})
+                print(f"[G8-RENDER] {label} 完成，{elapsed:.2f}s", flush=True)
     except Exception as exc:
-        warnings.append(f"G8-RENDER: 渲染级检查异常（{exc}），需人工复核标注/图例/双轴/同行散点")
+        failures.append(f"G8-RENDER: 渲染级检查异常（{exc}），检查未完成")
+    from run_support import atomic_json
+    atomic_json(project / "reports" / "图表检查计时.json", {"charts":timings, "status":"FAIL" if failures else "PASS", "xticks_shared_render":True})
     return warnings, failures
 
 
@@ -1065,6 +1388,7 @@ def _check_all_xticks(project: Path) -> tuple[list[str], list[str]]:
         ind = mod.load_industry_cost_price(data_dir)
         if ind and "industry_cost_price" not in ops:
             ops["industry_cost_price"] = ind
+        mod.configure_latest(data_dir)
         pl_raw = mod.load_csv(data_dir, "利润表_按报告期.csv")
         fi_raw = mod.load_csv(data_dir, "主要财务指标_按报告期.csv")
         div = mod.load_csv(data_dir, "分红送配记录.csv")
@@ -1088,7 +1412,10 @@ def _check_all_xticks(project: Path) -> tuple[list[str], list[str]]:
             ("图15", lambda: mod.fig_leverage(ops)),
             ("图16", lambda: mod.fig_industry_cost_price(ops, data_dir)),
         ]
+        exempt = _chart_exemptions(project)
         for label, fn in jobs:
+            if label in exempt:
+                continue
             try:
                 fig = fn()
             except Exception:

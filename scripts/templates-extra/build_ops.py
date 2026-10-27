@@ -111,15 +111,29 @@ def main():
     pb_cur = round(cur_close / bps_by_year[2025], 2) if 2025 in bps_by_year else None
     pe_band = {"标题": "图13 PE_TTM 估值带（A股，年度口径）", "labels": [str(r["y"]) for r in pe_rows] + ["当前"],
                "pe_ttm": [r["mean"] for r in pe_rows] + [pe_cur],
-               "pe_high": [r["high"] for r in pe_rows] + [max(r["high"] for r in pe_rows)],
-               "pe_low": [r["low"] for r in pe_rows] + [min(r["low"] for r in pe_rows)],
-               "pe_mean": [r["mean"] for r in pe_rows] + [round(float(np.mean([r["mean"] for r in pe_rows])), 1)]}
+               # 当前点没有完整的年度 TTM 区间，使用单点而非复制全历史边界。
+               "pe_high": [r["high"] for r in pe_rows] + [pe_cur],
+               "pe_low": [r["low"] for r in pe_rows] + [pe_cur],
+               "pe_mean": [r["mean"] for r in pe_rows] + [pe_cur]}
     pb_band = {"标题": "图14 PB 估值带（A股，年度口径）", "labels": [str(r["y"]) for r in pb_rows] + ["当前"],
                "pb": [r["mean"] for r in pb_rows] + [pb_cur],
-               "pb_high": [r["high"] for r in pb_rows] + [max(r["high"] for r in pb_rows)],
-               "pb_low": [r["low"] for r in pb_rows] + [min(r["low"] for r in pb_rows)]}
+               "pb_high": [r["high"] for r in pb_rows] + [pb_cur],
+               "pb_low": [r["low"] for r in pb_rows] + [pb_cur]}
 
+    # 图06 标的身份必须唯一且显式；中国移动 A/H 两个证券行中仅 A 股目标行标记为标的。
+    peers = [dict(row, **{"标的": row.get("公司") == "中国移动(A)"}) for row in [
+            {"公司": "中国移动(A)", "PE": 16.1, "PB": 1.52, "ROE": 9.9, "营收增速": -1.1, "净利增速": -6.3},
+            {"公司": "中国移动(H)", "PE": 11.7, "PB": 1.08, "ROE": 9.9, "营收增速": -1.1, "净利增速": -6.3},
+            {"公司": "中国电信(A)", "PE": 18.1, "PB": 1.30, "ROE": 7.5, "营收增速": -2.3, "净利增速": -17.1},
+            {"公司": "中国联通(A)", "PE": 15.6, "PB": 1.00, "ROE": 5.0, "营收增速": -0.5, "净利增速": -18.0},
+            {"公司": "Verizon", "PE": 10.8, "PB": 1.90, "ROE": 13.2, "营收增速": 2.5, "净利增速": -1.7},
+            {"公司": "AT&T", "PE": 7.7, "PB": 1.40, "ROE": 12.0, "营收增速": 2.8, "净利增速": 15.0},
+            {"公司": "T-Mobile", "PE": 20.3, "PB": 3.68, "ROE": 18.2, "营收增速": 11.3, "净利增速": 20.0},
+            {"公司": "NTT", "PE": 12.1, "PB": 1.32, "ROE": 10.4, "营收增速": 5.1, "净利增速": 8.0},
+            {"公司": "KDDI", "PE": 14.8, "PB": 2.04, "ROE": 14.0, "营收增速": 5.6, "净利增速": 5.0},
+        ]]
     ops = {
+        "target": {"公司": "中国移动(A)", "代码": "600941"},
         "segment": {
             "标题": "图03 分部营收构成（主营业务三大主业，亿元）",
             "labels": ["2024", "2025", "2026H1"],
@@ -146,17 +160,7 @@ def main():
             "Capex": capex_company,
             "FCF": fcf_full,
         },
-        "peers": [
-            {"公司": "中国移动(A)", "PE": 16.1, "PB": 1.52, "ROE": 9.9, "营收增速": -1.1, "净利增速": -6.3, "高亮": True},
-            {"公司": "中国移动(H)", "PE": 11.7, "PB": 1.08, "ROE": 9.9, "营收增速": -1.1, "净利增速": -6.3, "高亮": True},
-            {"公司": "中国电信(A)", "PE": 18.1, "PB": 1.30, "ROE": 7.5, "营收增速": -2.3, "净利增速": -17.1},
-            {"公司": "中国联通(A)", "PE": 15.6, "PB": 1.00, "ROE": 5.0, "营收增速": -0.5, "净利增速": -18.0},
-            {"公司": "Verizon", "PE": 10.8, "PB": 1.90, "ROE": 13.2, "营收增速": 2.5, "净利增速": -1.7},
-            {"公司": "AT&T", "PE": 7.7, "PB": 1.40, "ROE": 12.0, "营收增速": 2.8, "净利增速": 15.0},
-            {"公司": "T-Mobile", "PE": 20.3, "PB": 3.68, "ROE": 18.2, "营收增速": 11.3, "净利增速": 20.0},
-            {"公司": "NTT", "PE": 12.1, "PB": 1.32, "ROE": 10.4, "营收增速": 5.1, "净利增速": 8.0},
-            {"公司": "KDDI", "PE": 14.8, "PB": 2.04, "ROE": 14.0, "营收增速": 5.6, "净利增速": 5.0},
-        ],
+        "peers": peers,
         "targets": {
             "labels": ["当前价", "悲观PE", "基准PE", "乐观PE", "DCF基准", "龟龟买入价", "龟龟门槛价"],
             "values": [97.71, 84, 94, 103, 119, 98.64, 96.79],

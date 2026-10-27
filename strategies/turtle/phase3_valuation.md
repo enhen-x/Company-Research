@@ -194,11 +194,20 @@ PP = 10年最高价（日期）
 
 ## Part 2：报告组装
 
-整合 preflight + 定性分析报告 + Agent B + 估值分析，按以下模板输出完整报告。
+整合 preflight + 定性分析报告 + Agent B + 估值分析，按技能唯一主报告模板 `references/report-template.md` v3 输出完整报告。
 
 写入 `{output_dir}/{公司名}_{代码}_分析报告.md`：
 
-<report_template>
+成稿硬性要求：
+
+1. 先读取 `references/report-template.md` 完整内容；主报告只能使用十部分固定章节，顺序不可调整、不可合并、不可省略。
+2. 每个一级章节必须包含事实内容、数据依据和 `**本节结论**`；第 4 章必须包含 `§4.1` 至 `§4.4`，四个子节各有 `**小节结论**`。
+3. `§4.3` 必须按模板回答九个关键问题并嵌入五张体检图；不适用或缺失项保留并说明原因及影响。
+4. 最终写入后运行 `scripts/report_template_qc.py`，任何 FAIL 都不得交付。
+
+下方旧版骨架仅保留作字段映射参考，不得复制为主报告结构：
+
+<legacy_report_template_reference>
 
 ```markdown
 # 龟龟投资策略 · 分析报告：{公司名称}（{股票代码}）
@@ -491,7 +500,7 @@ PP = 10年最高价（日期）
 本报告由AI模型基于龟龟投资策略v2框架自动生成，仅供参考，不构成投资建议。投资者应自行核实数据并根据自身风险承受能力决策。
 ```
 
-</report_template>
+</legacy_report_template_reference>
 
 ---
 

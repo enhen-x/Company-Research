@@ -1,165 +1,206 @@
-# Company Research —— 统一证券调研技能
+# Company Research v3
 
-> **一句话触发**：`调研 <公司名或股票代码>` → 自动拉数 → 数据审计 → 券商深度八步分析 → 穿透回报率估值 → 交叉验证 → 评级结论。
-> 适用于 **A 股 / 港股 / 美股**。
+面向 A 股、港股和美股的统一证券调研技能，将数据采集、财报核查、公司研究、盈利预测、估值、报告成稿和后续复验连接为一套可追溯流程。
 
----
+**本仓库默认分支现维护 v3，技能入口为 `$company-research-v3`。** 在支持技能的 AI 助手中输入“调研 公司名或股票代码”，即可按 [SKILL.md](SKILL.md) 执行完整研究。
 
-## 目录
+## v3 的主要变化
 
-- [核心能力](#核心能力)
-- [快速开始](#快速开始)
-- [使用示例](#使用示例)
-- [统一工作流](#统一工作流)
-- [穿透回报率估值](#穿透回报率估值龟龟框架)
-- [目录结构](#目录结构)
-- [测试](#测试)
-- [环境与数据源](#环境与数据源)
-- [常见问题](#常见问题)
-- [License](#license)
+| 变化 | 实际行为 |
+| --- | --- |
+| 统一报告 | 固定十章结构，Markdown 是唯一正文源；主报告 HTML 由 `md_to_html.py` 生成并内嵌图片 |
+| 本期财报体检 | 生成可复算 JSON、证据摘要和五张固定体检图，检查增长、现金化、营运资本及非主营贡献 |
+| 最新期间图表 | 完整年度与季度实际分别展示，累计流量差分为单季，避免半年冒充全年、预测冒充实际 |
+| 有界数据采集 | 候选源切换、硬超时、有限重试和缓存；保留旧数据时明确标记本轮更新失败 |
+| 研究专题计算 | 指引、经营驱动、预测、反方及估值结果集中于结构化输入与输出，缺口保留 `INCOMPLETE` |
+| 成稿执行记录 | 每轮记录 `run_id`、阶段状态、退出码、耗时和输入/产物哈希；技术结果与研究证据等级分别披露 |
+| 图表修复 | 环形图清理空标签，保持百分比与扇区一致；双轴图合并全部有效系列，保留右轴价格图例 |
 
----
+版本变更见 [CHANGELOG.md](CHANGELOG.md)，完整执行规则见 [流水线契约](references/flow-contract.md)。
 
-## 核心能力
+## 安装
 
-| 模块 | 能力 | 入口 |
-|------|------|------|
-| 📊 数据流水线 | 解析公司/代码 → 探测数据源 → 带兜底的拉数 → 三表审计 | `scripts/research_pipeline.py` |
-| 🏛️ 券商深度分析 | 宏观→行业→公司→财务→预测→估值→建议→报告 八步框架（格雷厄姆/胡克方法论、四种估值方法） | `references/framework.md` |
-| 🐢 穿透回报率估值 | OE / R\* / GG / II / KK / 目标买入价 / 仓位建议 | `references/methodology.md` + `scripts/calc_penetration_return.py` |
-| 🏭 商业质量分析 | PDF-first 6 维度定性评估（Greenwald 护城河） | `shared/qualitative/coordinator.md` |
-| 💰 独立估值 | DCF / DDM / PE Band / PEG / PS | `strategies/valuation/coordinator.md` |
-| 🔍 选股器 | Tier 1 批量过滤 + Tier 2 深度分析 | `scripts/screener_core.py` |
-| 📈 图表与门控 | 图 01–18 固定映射、PNG+Plotly 双输出、G8 渲染级质量门 | `scripts/analyze_charts.py` / `chart_qc.py` |
-| 📋 跟踪闭环 | 预测-实际台账、季度复验、偏差归因、方法回写 | `scripts/verification.py` + `references/tracking_template.md` |
+环境要求：
 
-## 快速开始
+- Python 3.10 或更高版本，依赖见 [requirements.txt](requirements.txt)。
+- [Pandoc 3.x](https://pandoc.org/installing.html)，用于生成自包含主报告 HTML；安装后确认 `pandoc --version` 可运行。
+- 中文图表需要可用的中文字体，例如 Microsoft YaHei、SimHei；按运行环境配置。
+- Tushare Pro Token 可选；缺少 Token 时，支持的数据项使用 AkShare / yfinance 等候选源，实际覆盖以拉取清单为准。
 
-### 环境要求
-
-- Python >= 3.10
-- （推荐）[Tushare Pro](https://tushare.pro/) Token：`TUSHARE_TOKEN`；缺失时自动降级 **AkShare**（A 股）/ **yfinance**（港美股）
-- 依赖见 [`requirements.txt`](requirements.txt)
-
-### 安装
+克隆并安装 Python 依赖，建议在虚拟环境中执行：
 
 ```bash
-# 1. 克隆本仓库（或作为 Codex/Claude skill 安装到 ~/.codex/skills/company-research）
-git clone <repo-url> company-research
-cd company-research
-
-# 2. 一键初始化：创建 venv → 安装依赖 → 校验 Token → 运行测试
-bash init.sh
+git clone https://github.com/enhen-x/Company-Research.git company-research-v3
+cd company-research-v3
+python -m pip install -r requirements.txt
+pandoc --version
 ```
 
-### 第一次分析
+在 Codex 中使用时，将仓库放在 `~/.codex/skills/company-research-v3/`。其他支持技能的助手按各自安装方式加载本仓库的 `SKILL.md`；Claude Code 命令入口位于 `.claude/commands/`。
+
+可选配置：复制 `.env.sample` 为 `.env`，填入自己的 `TUSHARE_TOKEN`；也可通过同名环境变量提供。`.env` 已被 Git 忽略。Linux / macOS 可使用 `bash init.sh` 创建虚拟环境、安装依赖并运行初始化检查；Windows PowerShell 可直接使用上面的 Python 命令。
+
+## 快速使用
+
+### 在 AI 助手中发起研究
+
+```text
+$company-research-v3 调研 新和成（002001）
+```
+
+也可使用以下请求：
+
+| 任务 | 示例 |
+| --- | --- |
+| 完整公司研究 | `调研 新和成` / `分析 002001` |
+| 穿透回报率估值 | `对 新和成 做穿透回报率估值` |
+| 商业质量分析 | `对 新和成 做商业质量分析` |
+| 独立估值 | `对 新和成 做独立估值分析` |
+| 选股 | `用龟龟选股器筛选……` |
+
+### 仅运行数据流水线
+
+在仓库根目录执行：
 
 ```bash
-# 自动完成 B1-B3（立项、拉数、审计）
-python scripts/research_pipeline.py "调研 温氏股份"
-
-# 查看数据包（也可用 Tushare 直接采集）
-python scripts/tushare_collector.py --code 300498.SZ --output output/data_pack_market.md
+python scripts/research_pipeline.py "调研 新和成" --root "./research"
 ```
 
-## 使用示例
+该命令完成立项、候选源拉数、审计、财报体检和最新期间证据，并建立研究批次。行业补证、商业判断、预测假设及正文由 AI 助手继续按框架完成；单次拉数命令不代表完整研究已完成。
 
-| 你想做什么 | 输入 |
-|-----------|------|
-| 完整调研（推荐） | `调研 温氏股份` / `调研 300498` |
-| 完整分析流水线 | `分析 温氏股份` |
-| 穿透回报率估值 | `对 温氏股份 做穿透回报率估值` |
-| 商业质量分析 | `对 温氏股份 做商业质量分析` |
-| 独立估值 | `对 温氏股份 做独立估值分析` |
-| 选股 | `用选股器筛选 ...` |
+### 完成模型与正文后成稿
 
-## 统一工作流
-
-```
-调研 <公司名/代码>
-   │
-   ├─ B1 解析与立项 ──► <市场>.<代码> <公司名>/ + <YYYY_MM_DD>/ 批次目录
-   ├─ B2 数据拉取 ────► probe_sources → fetch_with_fallback（东财/腾讯/新浪多源兜底）
-   ├─ B3 数据审计 ────► 三表勾稽 / 异常值 / 分红一致性 / 支付率双法 / OCF 季节性
-   ├─ B4 八步分析 ────► 宏观→行业→公司→财务→预测→估值→建议→报告（9 必备模块）
-   │                     └─ 穿透回报率估值（calc_penetration_return.py）
-   ├─ B5 交叉验证 ────► 多源 / 多方法估值交叉验证 / 逻辑审计
-   ├─ B6 结论与交付 ──► 十部分报告 + 交付清单核对 + 跟踪验证台账
-   └─ E   成稿审计 ────► G1-G21 门控 + chart_qc 图表质量门
-```
-
-## 穿透回报率估值（龟龟框架）
-
-**主口径 R\* = 归母净利 C × 折扣系数 k × 支付率 M / 市值**；**现金校验 GG = 真实可支配现金 AA × M / 市值**。
-
-- **门槛 II** = max(3.5%, Rf + 2%)（A 股校准；港/美股用当地 Rf+2%）
-- **安全边际 KK** = GG − II
-- **目标买入价** = 股价 × GG / II；**门槛价格** = 股价 × II / GG
-- **仓位推导链**：KK → 外推可信度 → 价值陷阱风险（缺环降档；GG≤II 不建仓）
-
-银行/保险/券商/地产等金融行业自动触发**行业适配方案**（可持续股息率 / EV+NBV / ROE×PB / NAV 折让），详见 `references/methodology.md`。
+在对应批次目录执行：
 
 ```bash
-python scripts/build_penetration_input.py <项目>            # 生成输入 JSON
-python scripts/calc_penetration_return.py --config input/穿透回报率_输入.json --json
+python scripts/gate_all.py --dir . --report "reports/新和成_002001_分析报告.md"
 ```
 
-## 目录结构
+统一入口先做期间和模板预检，再重建固定图表、交互图表 HTML 与主报告 HTML，执行财报体检、图表、格式和适用的 SOTP 检查。模型输入、图表豁免与 SOTP 触发状态须按技能契约准备齐全。
 
-```
-company-research/
-├── SKILL.md                      # ★ 技能唯一入口
-├── README.md                     # 本文件
-├── init.sh / requirements.txt    # 环境
-├── agents/openai.yaml            # 技能界面配置
-├── references/                   # 方法论与框架（framework / methodology / 证券分析方法论等）
-├── scripts/                      # 数据流水线 / 图表 / 估值计算器 / 选股器
-├── prompts/                      # 全流程协调器与 Phase 1/2/3 提示词
-├── strategies/                   # 分析策略 / 独立估值策略
-├── shared/                       # 商业质量分析共享模块
-├── tests/                        # pytest 测试（Mock 数据，无需 Token）
-├── notebooks/                    # 选股器 notebook
-└── .claude/commands/             # Claude Code 斜杠命令
+## 研究流程与产物
+
+```text
+B1 立项：公司目录、日期批次、复制最新脚本
+ ↓
+B2—B3：有界拉数、三表与分红审计、缺口记录
+ ↓
+B3.5—B3.6：财报体检证据、最新实际期间
+ ↓
+B4—B5：宏观行业 → 公司质量 → 财务 → 预测 → 估值 → 交叉验证
+ ↓
+B6：形成唯一 Markdown 正文，重建图表与 HTML，核查交付状态
+ ↓
+后续批次：预测与实际对照、归因、修正与跟踪
 ```
 
-## 测试
+主报告固定为十章：投资摘要、宏观与行业分析、公司分析、财务分析、盈利预测、估值分析、投资建议与目标价、催化剂与跟踪、风险与反证条件、附录。正文模板见 [report-template.md](references/report-template.md)。
+
+每家公司按日期保留批次，典型结构如下：
+
+```text
+SZ.002001 新和成/
+├── 财报更新验证.md                 # 跨批次预测与实际档案
+└── YYYY_MM_DD/
+    ├── README.md / ROADMAP.md / 交付清单.md
+    ├── data/                      # 原始数据、拉取清单、审计报告
+    ├── input/                     # 模型、判断、运营补充及豁免输入
+    ├── scripts/                   # 本批次使用的模板和复验脚本
+    └── reports/
+        ├── 新和成_002001_分析报告.md
+        ├── 新和成_002001_分析报告.html
+        ├── 新和成_002001_图表.html
+        ├── 图表/                  # 按适用性生成的标准图与五张体检图
+        ├── 本期财报体检.json
+        ├── 穿透回报率_输出.json
+        ├── 流水线执行状态.json
+        └── 跟踪验证台账.md
+```
+
+标准图号固定为图01—图18，适用性、期间、来源与豁免须明示；图表数量随公司和批次而变。首次研究没有事前预测样本时，不凭空生成历史预测胜率。
+
+## 估值与仓位口径
+
+研究结合行业适用方法、三情景预测、敏感性分析及龟龟现金纪律。DCF、PE/PB、SOTP 等按行业选择；共用经营假设的多种估值不算独立证据。金融及特殊行业按 [方法论](references/methodology.md) 适配。
+
+龟龟框架的主要关系为：
+
+| 指标 | 口径 |
+| --- | --- |
+| R* | 归母净利 C × 利润折扣 k × 支付率 M ÷ 市值 |
+| GG | 真实可支配现金 AA × 支付率 M ÷ 市值，作为现金校验 |
+| R_eff | 默认 R*；R*−GG≥2个百分点时，现金校验失败，降级为 GG |
+| 门槛 II | A股 max(3.5%, Rf+2%)；港股 max(5%, Rf+3%)；美股 max(4%, Rf+2%) |
+| 安全边际 KK | R_eff−II，再加有依据的周期调整 |
+| 目标买入价 | 当前价 × R_eff ÷ II |
+| 门槛价格 | 当前价 × II ÷ R_eff；R_eff≤0时无定义，R_eff≤II时不作为下行保护 |
+
+Rf 取当地十年期国债收益率；M 的承诺、历史分红及保守锚选择须有证据。R_eff≤II 不建仓，完整仓位还需考虑可预测性、价值陷阱风险、商业质量和集中度约束。12个月目标价与龟龟目标买入价分别解释。
+
+确定性计算示例，在批次目录执行：
 
 ```bash
-.venv/bin/python -m pytest tests/ -v          # 全部测试（Mock 数据，无需 Token）
-.venv/bin/python -m pytest tests/test_screener.py -v   # 单文件
-.venv/bin/python -m pytest tests/ -x -q       # 快速模式
+python scripts/calc_penetration_return.py --config "input/穿透回报率_输入.json" --out "reports/穿透回报率_输出.json"
 ```
 
-覆盖：Tushare 采集 + 衍生指标、PDF 预处理、Phase 提示词、协调器、输出格式、年报下载、选股器、增量刷新、报告一致性等（当前 920 passed / 3 skipped）。
+原始数据和计算 JSON 保留各脚本定义的单位与精度；对读者展示的金额统一亿元／万元，股数统一亿股／万股，数字最多两位小数。每股价格、单价和实物数量按其自身单位展示，切换单位须同步换算。
 
-## 环境与数据源
+## 如何判断交付完成
 
-| 数据源 | 用途 | 说明 |
-|--------|------|------|
-| Tushare Pro | 财务三表 / 行情 / 指标 / 分红（A/港/美股） | 需 `TUSHARE_TOKEN`，自动限速 ≥0.3s/次 |
-| AkShare | 降级采集（A 股） | Tushare 缺失时自动启用 |
-| yfinance | 降级采集（港/美股） | 同上 |
-| 东财 / 腾讯 / 新浪 | 拉数多源兜底（数据流水线 B2） | `fetch_with_fallback.py` 自动切换 |
+检查**本轮** `reports/流水线执行状态.json`：
 
-- 金额统一为**百万元（RMB）**（Tushare 原始数据自动 ÷1,000,000）
-- 选股器 Parquet 分层缓存：`output/.screener_cache/`
-- 所有脚本运行前先读 `references/engineering-notes.md`（实盘事故记录）
+- `status=PASS` 且 `delivery_ready=true`：本轮技术交付可用。
+- `fully_rebuilt=true`：本轮完整重建图表和 HTML。
+- `run_id`、阶段状态/退出码/耗时、输入和产物 SHA256：用于复核执行过程和文件版本；进程内检查不补造子进程退出码。
+- `research_quality`、证据等级和披露的研究缺口：与技术结果分别判断，技术 PASS 不等于研究完整或证据升级。
 
-## 常见问题
+`--check-only` 只检查现有文件，不提供交付或重建声明；`--incremental` 仅在输入、代码、正文和全部产物指纹匹配时复用构建，质量门仍重跑；`--legacy` 仅用于显式兼容历史批次。阶段与全流程预算可用 `--stage-timeout` / `--total-timeout` 调整，失败后应按执行账本定位原因。
 
-**Q：没有 Tushare Token 能用吗？**
-可以。自动降级 AkShare / yfinance；完整“调研”流水线（research_pipeline.py）走东财/腾讯/新浪多源兜底。
+## 数据源与限制
 
-**Q：这个技能在 Codex / Claude 里怎么用？**
-将本仓库复制到 `~/.codex/skills/company-research/`（或按你的 skill 安装方式），然后直接说“调研 某某公司”。
+| 数据来源 | 主要用途 | 使用边界 |
+| --- | --- | --- |
+| 公司公告、原版年报与中报 | 业务、附注、分红、管理层解释 | 公司自述与独立证据分开标注 |
+| Tushare Pro | 支持市场的三表、行情、指标与分红 | 需要 Token 及相应权限 |
+| AkShare / 东财 / 腾讯 / 新浪等候选 | A股数据流水线及替代来源 | 按数据项切换，成功以有效数据和报告期核验为准 |
+| yfinance | 港美股采集的候选来源 | 覆盖、字段及历史长度以实际获取结果为准 |
+| 行业公开资料 | 供需、价格、成本与同行比较 | 核对规格、日期和独立性，同源转载不计为独立双源 |
 
-**Q：图表质量门是什么？**
-成稿前运行 `scripts/chart_qc.py`，自动检查图号映射、PNG 引用、横坐标刻度渲染、数据标注越界、图例遮挡、图16 行业成本—价格契约等（G8/G8-SENS/G8-INDUSTRY/G8-RENDER），FAIL 项必须修复后才能交付。
+网络失败、期间不可比或字段缺失均须留痕，不静默填零或把旧文件称为本轮更新成功。不能取得的单品量价、维持性资本开支、现金流桥等，保留未知并说明对结论的影响。
+
+## 测试与维护
+
+在仓库根目录运行：
+
+```bash
+# 不调用在线集成测试
+python -m pytest tests/ -q -m "not integration"
+
+# 环形图百分比与双轴图例专项
+python -m pytest tests/test_segment_label_layout.py -q
+
+# 合成数据的全图模板回归，以及注入旧布局错误的负向自检
+python scripts/template_regression.py
+python scripts/template_regression.py --selfcheck
+```
+
+在线集成测试使用 `python -m pytest tests/ -m integration -v`，需配置相应 Token、权限和测试资料。
+
+2026-10-28 本次发布验证：离线测试 **1611 项通过**，3 项在线集成测试未执行；README 的本地链接与 Pandoc 渲染检查通过。
+
+模板以本仓库为真源。修复应回写 `scripts/`，补充有意义的回归检查，再同步至研究批次；不能只修单份 PNG 或项目副本。工程约束见 [engineering-notes.md](references/engineering-notes.md)，最新期间和排版契约见 [chart-period-contract.md](references/chart-period-contract.md)。
+
+## 仓库导航
+
+| 路径 | 内容 |
+| --- | --- |
+| [SKILL.md](SKILL.md) | 技能入口、触发规则与执行要求 |
+| [references/](references/) | 框架、方法论、报告模板、交付与跟踪规范 |
+| [scripts/](scripts/) | 数据、体检、图表、估值、成稿和复验工具 |
+| [strategies/](strategies/) / [shared/qualitative/](shared/qualitative/) | 龟龟、独立估值及商业质量分析流程 |
+| [tests/](tests/) | 单元测试、契约检查及离线回归 |
+| [CHANGELOG.md](CHANGELOG.md) | 版本与修复记录 |
 
 ## License
 
 [MIT](LICENSE)
-
----
-
-*Company Research —— 统一证券调研技能 v1.0 ｜ 2026-08-23*

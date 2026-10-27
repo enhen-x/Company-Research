@@ -6,6 +6,7 @@ Section 17 derived metrics: financial trends, Factor 2/3/4 computations.
 import pandas as pd
 
 from format_utils import format_number, format_table, format_header
+from valuation_math import canonical_ebitda, cagr
 
 
 class DerivedMetricsMixin:
@@ -30,16 +31,10 @@ class DerivedMetricsMixin:
 
         # CAGR calculation
         def _cagr(series: list[tuple[str, float | None]]) -> str:
-            vals = [v for _, v in series if v is not None and v > 0]
-            if len(vals) < 2:
+            value = cagr(series)
+            if value is None:
                 return "—"
-            # series is desc order: [latest, ..., oldest]
-            latest, oldest = vals[0], vals[-1]
-            n = len(vals) - 1
-            if oldest <= 0:
-                return "—"
-            cagr = (latest / oldest) ** (1 / n) - 1
-            return f"{cagr * 100:.2f}%"
+            return f"{value * 100:.2f}%"
 
         rev_cagr = _cagr(rev_series)
         np_cagr = _cagr(np_series)
@@ -455,80 +450,92 @@ class DerivedMetricsMixin:
 
         # Helper: interest-bearing debt components (yuan)
         def _ibd_yuan(row):
-            total = 0.0
+            values = []
             for c in ["st_borr", "lt_borr", "bond_payable", "non_cur_liab_due_1y"]:
                 v = self._safe_float(row.get(c))
-                if v:
-                    total += v
-            return total
+                if v is not None:
+                    values.append(v)
+            return sum(values) if len(values) == 4 else None
 
         ibd_yuan = _ibd_yuan(latest_bs)
-        cash_yuan = self._safe_float(latest_bs.get("money_cap")) or 0
+        cash_yuan = self._safe_float(latest_bs.get("money_cap"))
         trad_yuan = self._safe_float(latest_bs.get("trad_asset")) or 0
         goodwill_yuan = self._safe_float(latest_bs.get("goodwill")) or 0
         total_assets_yuan = self._safe_float(latest_bs.get("total_assets")) or 0
         equity_yuan = self._safe_float(latest_bs.get("total_hldr_eqy_exc_min_int")) or 0
 
-        oper_profit_yuan = self._safe_float(latest_inc.get("operate_profit")) or 0
-        finance_exp_yuan = self._safe_float(latest_inc.get("finance_exp")) or 0
-        np_parent_yuan = self._safe_float(latest_inc.get("n_income_attr_p")) or 0
+        oper_profit_yuan = self._safe_float(latest_inc.get("operate_profit"))
+        total_profit_yuan = self._safe_float(latest_inc.get("total_profit"))
+        # Use an explicitly reported financing/interest expense field only;
+        # the operating-profit subtotal is never used as a proxy for PBT.
+        finance_exp_yuan = self._safe_float(latest_inc.get("int_exp"))
+        if finance_exp_yuan is None:
+            finance_exp_yuan = self._safe_float(latest_inc.get("interest_expense"))
+        np_parent_yuan = self._safe_float(latest_inc.get("n_income_attr_p"))
 
-        da_yuan = 0.0
-        for c in ["depr_fa_coga_dpba", "amort_intang_assets", "lt_amort_deferred_exp"]:
-            v = self._safe_float(latest_cf.get(c))
-            if v:
-                da_yuan += v
+        if self._is_hk(ts_code) or self._is_us(ts_code):
+            # The foreign-market adapters map a total D&A field here.
+            da_yuan = self._safe_float(latest_cf.get("depr_fa_coga_dpba"))
+        else:
+            da_values = [self._safe_float(latest_cf.get(c)) for c in
+                         ("depr_fa_coga_dpba", "amort_intang_assets", "lt_amort_deferred_exp")]
+            da_yuan = sum(da_values) if all(value is not None for value in da_values) else None
 
-        ocf_yuan = self._safe_float(latest_cf.get("n_cashflow_act")) or 0
-        capex_yuan = self._safe_float(latest_cf.get("c_pay_acq_const_fiolta")) or 0
-        fcf_yuan = ocf_yuan - capex_yuan
+        ocf_yuan = self._safe_float(latest_cf.get("n_cashflow_act"))
+        capex_yuan = self._safe_float(latest_cf.get("c_pay_acq_const_fiolta"))
+        fcf_yuan = (ocf_yuan - capex_yuan
+                    if ocf_yuan is not None and capex_yuan is not None else None)
 
         # Convert to 百万元
-        ibd = ibd_yuan / 1e6
-        cash = cash_yuan / 1e6
+        ibd = ibd_yuan / 1e6 if ibd_yuan is not None else None
+        cash = cash_yuan / 1e6 if cash_yuan is not None else None
         trad = trad_yuan / 1e6
         goodwill = goodwill_yuan / 1e6
         ta = total_assets_yuan / 1e6
         equity = equity_yuan / 1e6
-        oper_profit = oper_profit_yuan / 1e6
-        fin_exp = finance_exp_yuan / 1e6
-        np_parent = np_parent_yuan / 1e6
-        da = da_yuan / 1e6
-        fcf = fcf_yuan / 1e6
+        oper_profit = oper_profit_yuan / 1e6 if oper_profit_yuan is not None else None
+        total_profit = total_profit_yuan / 1e6 if total_profit_yuan is not None else None
+        fin_exp = finance_exp_yuan / 1e6 if finance_exp_yuan is not None else None
+        np_parent = np_parent_yuan / 1e6 if np_parent_yuan is not None else None
+        da = da_yuan / 1e6 if da_yuan is not None else None
+        fcf = fcf_yuan / 1e6 if fcf_yuan is not None else None
 
         # ===== Part A: Valuation indicators =====
         # Manual calculations (fallback)
-        ebitda = oper_profit + fin_exp + da
-        net_debt = ibd - cash  # positive = net debt, negative = net cash
+        ebitda = canonical_ebitda(total_profit, fin_exp, da)
+        ebitda_note = "税前利润+费用化利息+D&A（口径缺失不估算）"
+        net_debt = ibd - cash if ibd is not None and cash is not None else None
+        fcf_basis = "OCF-Capex；未判定FCFF/FCFE，仅现金差额/市值"
 
         # Prefer fina_indicator pre-computed values when available
         fi_df = self._store.get("fina_indicators")
         if fi_df is not None and not fi_df.empty:
-            fy_month_str = f"{self._fy_end_month:02d}"
-            fi_annual = fi_df[fi_df["end_date"].str[4:6] == fy_month_str].sort_values(
+            fi_annual = fi_df[fi_df["end_date"].astype(str) == str(latest_inc.get("end_date"))].sort_values(
                 "end_date", ascending=False)
             if not fi_annual.empty:
                 fi_row = fi_annual.iloc[0]
                 v = self._safe_float(fi_row.get("ebitda"))
                 if v is not None:
-                    ebitda = v / 1e6
+                    ebitda_note += f"；provider EBITDA={v / 1e6:,.2f}，仅交叉核对，未替换共享定义"
                 v = self._safe_float(fi_row.get("netdebt"))
                 if v is not None:
                     net_debt = v / 1e6
                 v = self._safe_float(fi_row.get("fcff"))
                 if v is not None:
                     fcf = v / 1e6
+                    fcf_basis = "FCFF/EV（provider派生指标）"
 
-        ev = mkt_cap + net_debt
-        net_cash = -net_debt
+        ev = mkt_cap + net_debt if net_debt is not None else None
+        net_cash = -net_debt if net_debt is not None else None
 
-        ev_ebitda = f"{ev / ebitda:.2f}x" if ebitda > 0 else "—"
-        cash_pe = f"{(mkt_cap - net_cash) / np_parent:.2f}x" if np_parent > 0 else "—"
-        fcf_yield = f"{fcf / mkt_cap * 100:.2f}%" if mkt_cap > 0 else "—"
+        ev_ebitda = f"{ev / ebitda:.2f}x" if ev is not None and ebitda is not None and ebitda > 0 else "—"
+        cash_pe = f"{(mkt_cap - net_cash) / np_parent:.2f}x" if net_cash is not None and np_parent is not None and np_parent > 0 else "—"
+        fcf_denominator = ev if fcf_basis.startswith("FCFF/") else mkt_cap
+        fcf_yield = f"{fcf / fcf_denominator * 100:.2f}%" if fcf is not None and fcf_denominator is not None and fcf_denominator > 0 else "—"
         pb = f"{mkt_cap / equity:.2f}x" if equity > 0 else "—"
-        net_debt_ebitda = f"{net_debt / ebitda:.2f}x" if ebitda > 0 else "—"
+        net_debt_ebitda = f"{net_debt / ebitda:.2f}x" if net_debt is not None and ebitda is not None and ebitda > 0 else "—"
         goodwill_ratio = f"{goodwill / ta * 100:.2f}%" if ta > 0 else "—"
-        ibd_ratio = f"{ibd / ta * 100:.2f}%" if ta > 0 else "—"
+        ibd_ratio = f"{ibd / ta * 100:.2f}%" if ibd is not None and ta > 0 else "—"
 
         # Dividend yield: latest DPS / close
         div_yield_str = "—"
@@ -549,10 +556,10 @@ class DerivedMetricsMixin:
         val_rows = [
             [f"总市值（{self._unit_label()}）", fmt(mkt_cap), "—"],
             [f"企业价值 EV（{self._unit_label()}）", fmt(ev), "市值+有息负债-现金"],
-            [f"EBITDA（{self._unit_label()}）", fmt(ebitda), "营业利润+财务费用+D&A"],
+            [f"EBITDA（{self._unit_label()}）", fmt(ebitda), ebitda_note],
             ["EV/EBITDA", ev_ebitda, "—"],
             ["扣除现金PE", cash_pe, "(市值-净现金)/归母净利润"],
-            ["FCF收益率", fcf_yield, "FCF/市值"],
+            ["FCF收益率", fcf_yield, fcf_basis],
             ["P/B", pb, "市值/归母权益"],
             ["净负债/EBITDA", net_debt_ebitda, "(有息负债-现金)/EBITDA，负值=净现金"],
             ["商誉/总资产", goodwill_ratio, "—"],
@@ -570,8 +577,9 @@ class DerivedMetricsMixin:
         baselines = []  # (name, value_yuan_per_share, logic)
 
         # ① Net liquid assets / share
-        nla = (cash_yuan + trad_yuan - ibd_yuan) / total_shares
-        baselines.append(("① 净流动资产/股", nla, "(现金+交易性金融资产-有息负债)/总股本"))
+        if cash_yuan is not None and ibd_yuan is not None:
+            nla = (cash_yuan + trad_yuan - ibd_yuan) / total_shares
+            baselines.append(("① 净流动资产/股", nla, "(现金+交易性金融资产-有息负债)/总股本"))
 
         # ② BVPS
         bvps = equity_yuan / total_shares

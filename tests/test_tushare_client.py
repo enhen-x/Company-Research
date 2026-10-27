@@ -14,6 +14,24 @@ from tushare_collector import TushareClient, WarningsCollector, rate_limit
 MOCK_DIR = os.path.join(os.path.dirname(__file__), "fixtures", "mock_tushare_responses")
 
 
+_TEST_CACHE_DIRS = []
+
+
+def _new_cache_dir(prefix):
+    directory = tempfile.TemporaryDirectory(prefix=prefix)
+    _TEST_CACHE_DIRS.append(directory)
+    return directory.name
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_test_cache_dirs():
+    try:
+        yield
+    finally:
+        while _TEST_CACHE_DIRS:
+            _TEST_CACHE_DIRS.pop().cleanup()
+
+
 def _load_mock(filename: str) -> pd.DataFrame:
     """Load a mock fixture as DataFrame."""
     with open(os.path.join(MOCK_DIR, filename)) as f:
@@ -29,7 +47,7 @@ def _make_client():
         mock_ts.pro_api.return_value = MagicMock()
         client = TushareClient("test_token")
     # Isolate tests from production cache and from each other
-    client._cache_dir = tempfile.mkdtemp(prefix="tushare_test_cache_")
+    client._cache_dir = _new_cache_dir(prefix="tushare_test_cache_")
     return client
 
 
@@ -216,6 +234,12 @@ class TestCachedUsDaily:
 
 
 class TestSafeCall:
+    @pytest.fixture(autouse=True)
+    def standard_api_route(self, monkeypatch):
+        # These tests exercise retry/reconnect on the standard endpoint names;
+        # the broker route has its own explicit tests in TestBrokerConfig.
+        monkeypatch.setattr("tushare_collector.get_api_url", lambda: None)
+
     @patch("tushare_collector.ts")
     def test_successful_call(self, mock_ts):
         mock_pro = MagicMock()
@@ -228,7 +252,7 @@ class TestSafeCall:
         with patch("tushare_collector.time.sleep"):
             result = client._safe_call("stock_basic", ts_code="600887.SH")
 
-        assert result.equals(expected_df)
+        pd.testing.assert_frame_equal(result, expected_df)
         mock_pro.stock_basic.assert_called_once_with(ts_code="600887.SH")
 
     @patch("tushare_collector.ts")
@@ -247,7 +271,7 @@ class TestSafeCall:
         with patch("tushare_collector.time.sleep"):
             result = client._safe_call("income", ts_code="600887.SH")
 
-        assert result.equals(expected_df)
+        pd.testing.assert_frame_equal(result, expected_df)
         assert mock_pro.income.call_count == 3
 
     @patch("tushare_collector.ts")
@@ -278,7 +302,7 @@ class TestSafeCall:
         with patch("tushare_collector.time.sleep"):
             result = client._safe_call("cashflow", ts_code="600887.SH")
 
-        assert result.equals(expected_df)
+        pd.testing.assert_frame_equal(result, expected_df)
         # pro_api called twice: once in __init__, once for reconnect
         assert mock_ts.pro_api.call_count == 2
         mock_pro_old.cashflow.assert_called_once()

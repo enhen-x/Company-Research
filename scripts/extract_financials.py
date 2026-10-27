@@ -113,7 +113,8 @@ def main() -> int:
     for _, r in fi_y.iterrows():
         rows.append({
             "报告期": r["REPORT_DATE"].strftime("%Y-%m-%d"),
-            "EPS": num(r.get("BASIC_EPS")),
+            # 东财主要财务指标常用 EPSJB；旧接口可能输出 BASIC_EPS。
+            "EPS": first_num(r, ["BASIC_EPS", "EPSJB"]),
             "BPS": num(r.get("BPS")),
             "ROE加权%": num(r.get("ROEJQ")),
             "投资收益率ROI%": num(r.get("TOTAL_ROI")),
@@ -137,18 +138,27 @@ def main() -> int:
             continue
         df = pd.read_csv(f, encoding="utf-8")
         df["date"] = pd.to_datetime(df["date"])
-        cur = float(df.iloc[-1]["close"])
+        # 前复权源在早期可能返回负值，不能混入十年分位；窗口按最新交易日回溯。
+        df = df[pd.to_numeric(df["close"], errors="coerce").notna()].copy()
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        latest_date = df["date"].max()
+        window_start = latest_date - pd.DateOffset(years=10)
+        valid_window = df[(df["date"] >= window_start) & (df["close"] > 0)].copy()
+        if valid_window.empty:
+            p(f"\n[WARN] {fname} 十年窗口无有效正收盘价，跳过分位计算")
+            continue
+        cur = float(valid_window.iloc[-1]["close"])
         d = {
             "最新收盘": round(cur, 3),
-            "日期": str(df.iloc[-1]["date"].date()),
-            "区间最低": round(float(df["close"].min()), 3),
-            "最低日期": str(df.loc[df["close"].idxmin(), "date"].date()),
-            "区间最高": round(float(df["close"].max()), 3),
-            "最高日期": str(df.loc[df["close"].idxmax(), "date"].date()),
-            "当前分位%": round((df["close"] < cur).mean() * 100, 1),
+            "日期": str(valid_window.iloc[-1]["date"].date()),
+            "区间最低": round(float(valid_window["close"].min()), 3),
+            "最低日期": str(valid_window.loc[valid_window["close"].idxmin(), "date"].date()),
+            "区间最高": round(float(valid_window["close"].max()), 3),
+            "最高日期": str(valid_window.loc[valid_window["close"].idxmax(), "date"].date()),
+            "当前分位%": round((valid_window["close"] < cur).mean() * 100, 1),
         }
         for y in (3, 5):
-            sub = df[df["date"] >= df["date"].max() - pd.DateOffset(years=y)]
+            sub = valid_window[valid_window["date"] >= latest_date - pd.DateOffset(years=y)]
             d[f"近{y}年分位%"] = round((sub["close"] < cur).mean() * 100, 1)
             d[f"近{y}年最低"] = round(float(sub["close"].min()), 3)
             d[f"近{y}年最高"] = round(float(sub["close"].max()), 3)

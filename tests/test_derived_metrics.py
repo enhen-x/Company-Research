@@ -649,6 +649,8 @@ class TestComputeDerivedMetrics:
 def _make_client_with_ev_store():
     """Create client with full _store including basic_info and weekly_prices."""
     client = _make_client_with_store()
+    # Explicit interest expense for the EBITDA bridge; net finance expense is distinct.
+    client._store["income"]["int_exp"] = 320e6
 
     # Add basic_info
     basic_df = _load_mock("daily_basic.json")
@@ -691,16 +693,16 @@ class TestFactor4EVBaseline:
         assert "167,240.00" in result
 
     def test_ebitda(self):
-        """EBITDA = 12890 + 320 + 3200 = 16,410.00."""
+        """EBITDA = pre-tax profit 12933 + interest 320 + D&A 3200 = 16,453.00."""
         client = _make_client_with_ev_store()
         result = client._compute_factor4_ev_baseline("600887.SH")
-        assert "16,410.00" in result
+        assert "16,453.00" in result
 
     def test_ev_ebitda(self):
-        """EV/EBITDA = 167240/16410 = 10.19x."""
+        """EV/EBITDA = 167240/16453 = 10.16x."""
         client = _make_client_with_ev_store()
         result = client._compute_factor4_ev_baseline("600887.SH")
-        assert "10.19" in result
+        assert "10.16" in result
 
     def test_cash_adjusted_pe(self):
         """(175000 - 7760) / 10120 = 16.53x."""
@@ -721,7 +723,7 @@ class TestFactor4EVBaseline:
         assert "2.97" in result
 
     def test_net_debt_ebitda(self):
-        """(21200 - 28960) / 16410 = -0.47x."""
+        """(21200 - 28960) / 16453 = -0.47x."""
         client = _make_client_with_ev_store()
         result = client._compute_factor4_ev_baseline("600887.SH")
         assert "-0.47" in result

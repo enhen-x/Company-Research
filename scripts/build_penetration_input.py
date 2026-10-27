@@ -11,26 +11,29 @@
     <out>/输入_判断点说明.md       （每个字段：值/来源/口径/机器算 or 人判断，判断点给建议+依据）
 
 机器字段（从三表 CSV 自动计算，零手算）：
-    C=归母净利(年报)  D=折旧摊销(FA_IR_DEPR+IA_AMORTIZE+LPE_AMORTIZE+USERIGHT_ASSET_AMORTIZE)
+    C=归母净利(年报)  D=折旧摊销（优先总额，否则明细加总；油气折耗不重复）
     G建议=近3年Capex/D&A比值  M法2=DPS×股本/归母净利（近3年均值；注意：分配股利现金列 ASSIGN_DIVIDEND_PORFIT
-    含偿付利息会低估支付率，禁用作法2）  法1=DPS/EPS 并列对比
+    含偿付利息及归属差异，不能直接当普通股分红，禁用作法2）  法1=DPS/EPS 并列对比
     surplus=OCF-D×G建议  AA_2y=近2年均值  AA_all=近5年均值  revenue_series 同口径
-    net_cash 狭义=货币资金（默认）/ 广义=货币资金+交易性金融资产（判断点）
+    cash_balance=货币资金（未扣债）；net_debt=有息负债−货币资金
     interest_bearing_debt(短借+长借+应付债+短融，默认不含租赁)
-    shares=股本(百万股)  market_cap=price×shares(百万元)  ebitda=营业利润+D  fcf=OCF-Capex
-    goodwill/total_assets/dps(最新财年含中期)/net_current_assets/book_equity/low_10y_close
+    shares=股本(百万股)  market_cap=price×shares(百万元)  ebitda=税前利润+费用化利息+D  fcf=OCF-Capex
+    goodwill/total_assets/dps(最新财年含中期)/working_capital/book_equity（扣其他权益工具）
+    cash_protection/low_10y_close 默认null，须经证据核实后启用；三表共同最近5个完整财年
 
 人判断点（脚本自动标注"需确认"，附建议值、依据、易错点）：
     G 是否采纳建议（建议值可能因扩产期 Capex 暴增而失真，需结合资本开支阶段判断）
     M 法1 vs 法2（偏差>5pct 排除法1）  AA 用 2y 还是 all
-    net_cash 狭义 vs 广义（methodology 默认狭义，用广义必须说明理由）
+    现金/债务范围及其他权益工具（缺失不可判定）
     rf 取值日期（默认需人工核对当日10年期国债）  cycle_adjust（弱周期=0）  λ 可信度
 
 λ 异常年诊断（复现水星家纺 2022 年教训）：对 surplus 序列逐段检测
     Δ结余/Δ收入 比值的符号一致性 + 单段主导度；任一异常 -> 自动降级为"保守参考"。
 """
+import math
 import argparse
 import json
+from valuation_math import canonical_ebitda
 import sys
 from pathlib import Path
 
@@ -84,10 +87,13 @@ def shares_from_profile(data_dir: Path) -> tuple[float | None, float | None]:
 
 
 def val_mm(df: pd.DataFrame, col: str) -> list:
-    """年报列值序列（元 -> 百万元），缺失填 0。仅用于金额列。"""
+    """Required core amounts; missing observations cannot become zero."""
     if col not in df.columns:
-        return [0.0] * len(df)
-    return (pd.to_numeric(df[col], errors="coerce").fillna(0) / UNIT).tolist()
+        raise ValueError(f"必需金额字段缺失：{col}")
+    values = pd.to_numeric(df[col], errors="coerce")/UNIT
+    if values.isna().any() or not all(math.isfinite(v) for v in values):
+        raise ValueError(f"必需金额字段不可判定：{col}，禁止填0")
+    return values.tolist()
 
 
 def val_per_share(df: pd.DataFrame, col: str) -> list:
@@ -110,230 +116,171 @@ def dps_by_fiscal_year(div: pd.DataFrame) -> pd.DataFrame:
     return d.groupby("财年")["DPS"].sum().sort_index()
 
 
+def amount_at(row, *names):
+    for name in names:
+        value = pd.to_numeric(row.get(name), errors="coerce")
+        if pd.notna(value) and math.isfinite(float(value)):
+            return float(value)/UNIT
+    return None
+
+
+def depreciation_amount(row):
+    # Aggregate takes precedence over its components. FA_IR_DEPR already includes
+    # oil/gas depletion; OILGAS_BIO_DEPR must not be added a second time.
+    total = amount_at(row, "DEPR_AMORT", "TOTAL_DEPR_AMORT")
+    if total is not None:
+        return total
+    names = ["FA_IR_DEPR", "IA_AMORTIZE", "LPE_AMORTIZE"]
+    if "USERIGHT_ASSET_AMORTIZE" in row.index:
+        names.append("USERIGHT_ASSET_AMORTIZE")
+    values = [amount_at(row, name) for name in names]
+    return sum(values) if all(v is not None for v in values) else None
+
+
+def financial_snapshot(balance, income, depreciation):
+    warnings = []
+    cash = amount_at(balance, "MONETARYFUNDS")
+    components = [amount_at(balance, name) for name in ("SHORT_LOAN","LONG_LOAN","BOND_PAYABLE","SHORT_BOND_PAYABLE")]
+    debt = sum(components) if all(v is not None for v in components) else None
+    warnings.append("有息负债为短借+长借+应付债+短融窄口径，租赁/一年内到期及其他融资须人工补核")
+    pbt = amount_at(income, "TOTAL_PROFIT")
+    interest = amount_at(income, "FE_INTEREST_EXPENSE")
+    ebitda = canonical_ebitda(pbt, interest, depreciation)
+    assets = amount_at(balance,"TOTAL_CURRENT_ASSETS")
+    liabilities = amount_at(balance,"TOTAL_CURRENT_LIAB")
+    working_capital = assets-liabilities if assets is not None and liabilities is not None else None
+    equity = amount_at(balance,"TOTAL_PARENT_EQUITY")
+    other_equity = amount_at(balance,"OTHER_EQUITY_TOOL")
+    ordinary_equity = equity-other_equity if equity is not None and other_equity is not None else None
+    result = {"cash_balance":cash, "interest_bearing_debt":debt,
+              "net_debt":debt-cash if debt is not None and cash is not None else None,
+              "working_capital":working_capital, "cash_protection":None,
+              "book_equity":ordinary_equity, "ebitda":ebitda}
+    for field, value in result.items():
+        if value is None:
+            warnings.append(f"{field} 未确认，保留null；不得用缺失值0或营运资本替代")
+    result["formula_sources"] = {"ebitda":"TOTAL_PROFIT+FE_INTEREST_EXPENSE+D（费用化利息，不以营业利润替代税前利润）",
+                                "cash_balance":"MONETARYFUNDS（未扣债）", "net_debt":"interest_bearing_debt-cash_balance",
+                                "working_capital":"TOTAL_CURRENT_ASSETS-TOTAL_CURRENT_LIAB（非现金保护）",
+                                "book_equity":"TOTAL_PARENT_EQUITY-OTHER_EQUITY_TOOL（归母普通股）"}
+    result["input_warnings"] = warnings
+    return result
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True, help="项目 data/ 目录（含三表/分红/日线 CSV）")
-    ap.add_argument("--out", required=True, help="输出目录（项目 input/）")
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--data", required=True)
+    ap.add_argument("--out", required=True)
     ap.add_argument("--company", required=True)
     ap.add_argument("--code", required=True)
-    ap.add_argument("--rf", type=float, default=0.017, help="10年期国债收益率（需人工核对当日值）")
-    ap.add_argument("--price", type=float, default=None, help="现价（缺省取日线最新收盘）")
-    # 龟龟轨 · 成长校准（forward，2026-08-21 新增）：前瞻盈利/支付率/折扣/结余为人工判断点
-    ap.add_argument("--c-fwd", type=float, default=None,
-                    help="前瞻归母净利（亿元，未来12个月/下一财年；有证据支撑才启用成长校准轨）")
-    ap.add_argument("--m-fwd", type=float, default=None, help="前瞻支付率锚（默认=M 保守锚）")
-    ap.add_argument("--k-fwd", type=float, default=None, help="前瞻折扣系数（默认=min(k,0.85)）")
-    ap.add_argument("--aa-fwd", type=float, default=None, help="前瞻真实可支配现金（亿元，可选，现金校验）")
-    ap.add_argument("--c-fwd-source", default="", help="前瞻盈利来源标注（如：券商一致预期下沿 52.6 亿）")
+    ap.add_argument("--rf", type=float, default=.017)
+    ap.add_argument("--price", type=float)
+    ap.add_argument("--payout", type=float, help="有证据支持的人工支付率；不提供时取历史最低档")
+    ap.add_argument("--c-fwd", type=float, help="亿元")
+    ap.add_argument("--m-fwd", type=float)
+    ap.add_argument("--k-fwd", type=float)
+    ap.add_argument("--aa-fwd", type=float, help="亿元")
+    ap.add_argument("--c-fwd-source", default="")
+    ap.add_argument("--overwrite", action="store_true", help="明确允许覆盖已有输入；默认保护人工判断")
     args = ap.parse_args()
-
-    data = Path(args.data)
-    pnl = annual_rows(pd.read_csv(data / "利润表_按报告期.csv", encoding="utf-8-sig"))
-    cf = annual_rows(pd.read_csv(data / "现金流量表_按报告期.csv", encoding="utf-8-sig"))
-    bs = annual_rows(pd.read_csv(data / "资产负债表_按报告期.csv", encoding="utf-8-sig"))
-    div = pd.read_csv(data / "分红送配记录.csv", encoding="utf-8-sig")
-    daily = pd.read_csv(data / "日线股价.csv", encoding="utf-8-sig")
-    daily_close = close_col(daily)
-
-    if len(pnl) < 5 or len(cf) < 5:
-        sys.exit(f"年报不足5年: 利润表 {len(pnl)} / 现金流 {len(cf)}")
-
-    years = [d.year for d in cf["REPORT_DATE"]]
-    revs_new = list(reversed(val_mm(pnl, "OPERATE_INCOME")))          # 由新到旧
-    C_new = list(reversed(val_mm(pnl, "PARENT_NETPROFIT")))
-    op_profit_new = list(reversed(val_mm(pnl, "OPERATE_PROFIT")))
-    # D 默认含使用权摊销（2021+ 租赁准则，实质折旧费用；水星家纺实战确认手填值含此项）
-    D_new = list(reversed([a + b + c + d for a, b, c, d in zip(
-        val_mm(cf, "FA_IR_DEPR"), val_mm(cf, "IA_AMORTIZE"), val_mm(cf, "LPE_AMORTIZE"),
-        val_mm(cf, "USERIGHT_ASSET_AMORTIZE"))]))
-    capex_new = list(reversed(val_mm(cf, "CONSTRUCT_LONG_ASSET")))    # 由新到旧
-    ocf_new = list(reversed(val_mm(cf, "NETCASH_OPERATE")))
-
-    # --- G 建议: 近3年 Capex/D&A（顺序由新到旧 -> 取 [:3]）---
-    g_pairs = [capex_new[i] / D_new[i] for i in range(len(capex_new)) if D_new[i] > 0]
-    g_last3 = g_pairs[:3] if len(g_pairs) >= 3 else g_pairs
-    G_suggest = round(sum(g_last3) / len(g_last3), 3) if g_last3 else 0.9
-    g_note = (f"近3年比值 {[round(x,2) for x in g_last3]}；"
-              f"若近年为扩产期（Capex 暴增），建议值失真，需结合资本开支阶段调回 0.7~0.9")
-
-    # --- M 法2: DPS×股本/归母净利（近3年；分配股利现金列含利息，禁用）---
-    dps_fy = dps_by_fiscal_year(div)
-    _sh, _mc = shares_from_profile(data)
-    shares_mm = _sh
-    shares_src = "公司概况.csv（腾讯实时）" if _sh else ""
-    if shares_mm is None:
-        shares_mm = float(bs.iloc[-1].get("SHARE_CAPITAL", 0) or 0) / UNIT  # 面值1元 -> 百万股
-        shares_src = "资产负债表 SHARE_CAPITAL"
-    if shares_mm is None or shares_mm <= 0:
-        shares_mm = round(C_new[0] / (eps_new[0] if eps_new[0] > 0 else 1), 3)
-        shares_src = "C/EPS 反推"
-    m2 = []
-    for i in range(min(3, len(years))):
-        y = years[-1 - i]
-        if y in dps_fy.index and C_new[i] > 0:
-            m2.append(dps_fy.loc[y] * shares_mm / C_new[i])
-    M2 = round(sum(m2) / len(m2), 3) if m2 else None
-    M2_min = round(min(m2), 3) if m2 else None
-    # --- M 法1: DPS/EPS（近3年；DPS 连续多年相同为疑似填充错误，禁用法1）---
-    eps_new = list(reversed(val_per_share(pnl, "BASIC_EPS")))
-    m1 = []
-    for i in range(min(3, len(years))):
-        y = years[-1 - i]
-        if y in dps_fy.index and eps_new[i] > 0:
-            m1.append(dps_fy.loc[y] / eps_new[i])
-    M1 = round(sum(m1) / len(m1), 3) if m1 else None
-    M1_min = round(min(m1), 3) if m1 else None
-
-    # --- surplus 序列 (由新到旧) 与 AA ---
-    # 注意: D_new/ocf_new 已是"由新到旧"，O-H 直接配对就是由新到旧，不得再 reversed
-    surplus_new = [o - h for o, h in zip(ocf_new, [d * G_suggest for d in D_new])]
-    AA_2y = round(sum(surplus_new[:2]) / 2, 1)
-    # AA_all = 近5年均值（methodology 定义 5 年均值，非全部历史——早期负 OCF 年会稀释均值）
-    AA_all = round(sum(surplus_new[:5]) / min(5, len(surplus_new)), 1)
-
-    # --- λ 异常年诊断 ---
-    lam_diag = []
-    for i in range(len(surplus_new) - 1):
-        dr = revs_new[i] - revs_new[i + 1]
-        ds = surplus_new[i] - surplus_new[i + 1]
-        if abs(dr) < 1e-6:
-            continue
-        lam_diag.append({"段": f"{i+1}(近第{i+1}段)", "Δ收入": round(dr, 1),
-                         "Δ结余": round(ds, 1), "λ段": round(ds / dr, 3)})
-    lam_vals = [d["λ段"] for d in lam_diag]
-    signs = {1 if v > 0 else -1 for v in lam_vals}
-    lam_credit = "中"
-    lam_verdict = "可用，建议结合业务事件判断"
-    if len(signs) > 1:
-        lam_credit = "低"
-        lam_verdict = "Δ结余/Δ收入符号不一致，λ 应降级为保守参考（敏感性表仅作参考）"
-    elif len(lam_vals) >= 3:
-        med = sorted(lam_vals)[len(lam_vals) // 2]
-        if abs(med) > 1e-6 and any(abs(v) > abs(med) * 2 for v in lam_vals):
-            lam_credit = "低"
-            lam_verdict = "单段主导（疑似异常年如疫情/资产处置），λ 应降级为保守参考，敏感性表仅作参考"
-
-    # --- 资产负债表/其他（最新年报）---
-    # 注意: 不存在的列/NaN 用 pd.to_numeric+fillna(0)，float(NaN or 0) 会因 NaN truthy 泄漏
-    lb = bs.iloc[-1]
-
-    def lv(col: str) -> float:
-        return float(pd.to_numeric(lb.get(col), errors="coerce")) if pd.notna(lb.get(col)) else 0.0
-
-    net_cash_narrow = lv("MONETARYFUNDS") / UNIT
-    # 广义现金 = 货币资金 + 理财（东财列名 TRADE_FINASSET_NOTFVTPL=以公允价值计量且其变动计入当期损益
-    # 的金融资产/理财，实测水星家纺 2025 年报 842.8 百万；旧列名 TRADE_FINASSET 等保留兼容）
-    net_cash_broad = net_cash_narrow + sum(lv(c) / UNIT for c in
-                                           ["TRADE_FINASSET_NOTFVTPL", "TRADE_FINASSET",
-                                            "FVTPL_FINASSET", "APPOINT_FVTPL_FINASSET"])
-    debt = sum(lv(c) / UNIT for c in ["SHORT_LOAN", "LONG_LOAN", "BOND_PAYABLE", "SHORT_BOND_PAYABLE"])
-    if shares_mm <= 0:
-        shares_mm = round(C_new[0] / (eps_new[0] if eps_new[0] > 0 else 1), 3)
-    price = args.price if args.price else float(daily[daily_close].iloc[-1])
-    if _mc:
-        market_cap = round(_mc, 1)  # 公司概况总市值（腾讯实时，百万元）
-        _mc2 = round(price * shares_mm, 1)
-        if abs(_mc2 - market_cap) / market_cap > 0.03:
-            print(f"[WARN] 市值交叉校验偏差 {abs(_mc2-market_cap)/market_cap*100:.1f}%：概况市值 {market_cap} 百万 vs price×shares {_mc2} 百万（股本口径 {shares_src}）")
-    else:
-        market_cap = round(price * shares_mm, 1)  # 百万元
-
-    goodwill = lv("GOODWILL") / UNIT
-    total_assets = lv("TOTAL_ASSETS") / UNIT
-    nca = (lv("TOTAL_CURRENT_ASSETS") - lv("TOTAL_CURRENT_LIAB")) / UNIT
-    book_equity = lv("TOTAL_PARENT_EQUITY") / UNIT
-    ebitda = round(op_profit_new[0] + D_new[0], 1)
-    fcf = round(ocf_new[0] - capex_new[0], 1)
-    dps_cur = round(dps_fy.get(years[-1], 0.0), 2) if years else 0.0
-    low10 = float(daily[daily_close].min())
-
-    cfg = {
-        "company": args.company, "code": args.code, "date": str(pd.Timestamp.today().date()),
-        "price": round(price, 2), "market_cap": round(market_cap, 1), "shares": round(shares_mm, 4),
-        "net_profit_C": round(C_new[0], 1), "depreciation_D": round(D_new[0], 1),
-        "capex_ratio_G": G_suggest, "profit_discount_k": 0.8, "payout_M": M2_min or M2 or M1 or 0.6,
-        "payout_M_min": M2_min or M1 or 0.6, "payout_M_mean": M2 or M1 or 0.6,
-        "aa_2y": AA_2y, "aa_all": AA_all, "rf": args.rf, "cycle_adjust_pct": 0.0,
-        "base_revenue": round(revs_new[0], 1),
-        "surplus_series": [round(x, 1) for x in surplus_new[:5]],
-        "revenue_series": [round(x, 1) for x in revs_new[:5]],
-        "net_cash": round(net_cash_narrow, 1), "interest_bearing_debt": round(debt, 1),
-        "ebitda": ebitda, "fcf": fcf, "goodwill": round(goodwill, 1),
-        "total_assets": round(total_assets, 1), "dps": dps_cur,
-        "net_current_assets": round(nca, 1), "book_equity": round(book_equity, 1),
-        "low_10y_close": round(low10, 2),
-    }
-    # 成长校准轨（可选）：亿元 -> 百万元（×100）
-    if args.c_fwd is not None:
-        cfg["net_profit_C_fwd"] = round(args.c_fwd * 100, 1)
-        if args.m_fwd is not None:
-            cfg["payout_M_fwd"] = args.m_fwd
-        if args.k_fwd is not None:
-            cfg["profit_discount_k_fwd"] = args.k_fwd
-        if args.aa_fwd is not None:
-            cfg["aa_fwd"] = round(args.aa_fwd * 100, 1)
-        if args.c_fwd_source:
-            cfg["c_fwd_source"] = args.c_fwd_source
-
-    m_diff = "≤5pct，法1可作参考" if M1 and M2 and abs(M1 - M2) <= 0.05 else ">5pct，排除法1"
-    lines = [
-        f"# 穿透回报率输入 — 判断点说明（{args.company} {args.code}，{cfg['date']}）",
-        "",
-        "> 机器字段由 build_penetration_input.py 从三表自动计算（零手算）；人判断点已标注建议与依据。",
-        "",
-        "## 机器字段（自动计算）",
-        f"- C 归母净利（最新年报）: {cfg['net_profit_C']} 百万（利润表 PARENT_NETPROFIT）",
-        f"- D 折旧摊销: {cfg['depreciation_D']} 百万（FA_IR_DEPR+IA_AMORTIZE+LPE_AMORTIZE+USERIGHT_ASSET_AMORTIZE 使用权摊销，2021+ 租赁准则实质折旧费用）",
-        f"- G 建议值: {cfg['capex_ratio_G']}——{g_note}",
-        f"- k 利润折扣系数（默认 0.8）: 0.7~0.9 按可预测性取档（强0.9/中0.8/弱0.7，保守方向取小值）",
-        f"- M 法2: 序列 {[round(x, 3) for x in m2]}（均值 {M2} / 最低档 {M2_min}；**分配股利现金列含偿付利息，禁用作法2**）",
-        f"- M 法1: {M1}（DPS/EPS，近3年；DPS 连续多年相同为疑似填充错误，禁用法1）——两法偏差: {m_diff}",
-        f"- AA_2y: {cfg['aa_2y']} / AA_all: {cfg['aa_all']}（surplus 序列: {cfg['surplus_series']}）",
-        f"- net_cash 狭义(货币资金): {net_cash_narrow:.1f} 百万 / 广义(含交易性金融资产): {net_cash_broad:.1f} 百万",
-        f"- 有息负债: {cfg['interest_bearing_debt']} 百万（短借+长借+应付债+短融，默认不含租赁）",
-        f"- shares: {cfg['shares']} 百万股 / market_cap: {cfg['market_cap']} 百万 / price: {cfg['price']}（股本来源: {shares_src}）",
-        f"- ebitda: {cfg['ebitda']}（营业利润+D）/ fcf: {cfg['fcf']}（OCF-Capex）/ dps: {cfg['dps']}（最新财年含中期）",
-        f"- low_10y_close: {cfg['low_10y_close']}（前复权10年最低收盘）",
-        "",
-        "## 人判断点（需确认，附建议与依据）",
-        f"1. **G** 建议 {cfg['capex_ratio_G']}——轻资产 0.7~0.9；扩产期建议值失真时调回区间并说明依据",
-        f"2. **M** 优先用章程/公告承诺最低支付率；无承诺建议取法2 历史最低档 = {M2_min}（均值 {M2} 仅交叉参考；法1 = {M1}，{m_diff}）",
-        "3. **k** 利润折扣系数默认 0.8——强可预测（垄断公用/顶级品牌/极稳定现金牛）0.9；中（稳定制造/一般消费）0.8；弱（周期/强竞争/收入波动大）0.7；保守方向取小值",
-        f"4. **AA** 默认 AA_2y={cfg['aa_2y']}，对比 AA_all={cfg['aa_all']}；结余口径变化必须说明理由",
-        f"5. **net_cash** 默认狭义 {net_cash_narrow:.1f}；methodology 默认狭义，用广义 {net_cash_broad:.1f} 必须说明理由",
-        f"6. **rf** = {args.rf}（--rf 传入，需核对当日 10 年期国债收益率；±0.5pct → 门槛 II ±0.5pct）",
-        "7. **cycle_adjust** = 0（弱周期不修正；周期股需依据）",
-        f"8. **λ 可信度: {lam_credit}**——{lam_verdict}；λ 段明细: {lam_diag}",
-    ]
-    if args.c_fwd is not None:
-        _mf = cfg.get("payout_M_fwd", cfg["payout_M"])
-        _kf = cfg.get("profit_discount_k_fwd", 0.85)
-        lines += [
-            "",
-            "## 龟龟轨 · 成长校准（forward，2026-08-21 新增）",
-            f"- C_fwd（前瞻盈利）: {cfg['net_profit_C_fwd']} 百万（= {args.c_fwd} 亿）——来源: {args.c_fwd_source or '未标注（须补证据：公司指引/券商一致预期下沿/自建驱动桥）'}",
-            f"- M_fwd: {_mf}（默认取 M 保守锚；分红率上行+中期分红承诺可上调至近3年均值并注明依据）",
-            f"- k_fwd: {_kf}（默认 min(k,0.85)，前瞻不确定性更高，折扣不放松）",
-            f"- aa_fwd: {cfg.get('aa_fwd', '未提供')} 百万（可选，现金校验）",
-            "- 纪律：评级锚仍为保守轨 trailing；成长校准轨只给『成长验证买入区』与升级触发（实际数据验证后才可升级主轨）；禁止把两轨目标价混用",
-        ]
-    lines += [
-        "",
-        "## 使用",
-        "确认人判断点后复制 穿透回报率_输入.json 至 input/ 并运行 calc_penetration_return.py --config。",
-    ]
     out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "穿透回报率_输入.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    (out / "输入_判断点说明.md").write_text("\n".join(lines), encoding="utf-8")
-    print(f"✅ 已生成 {out / '穿透回报率_输入.json'} 与 输入_判断点说明.md")
-    print(f"   核心: C={cfg['net_profit_C']} D={cfg['depreciation_D']} G建议={cfg['capex_ratio_G']} "
-          f"M2均值={M2} M2最低={M2_min} M1={M1} k={cfg['profit_discount_k']} AA_2y={cfg['aa_2y']} AA_all={cfg['aa_all']}")
-    print(f"   市值={cfg['market_cap']}百万 net_cash窄/宽={net_cash_narrow:.1f}/{net_cash_broad:.1f} "
-          f"λ可信度={lam_credit} 判断点详见 输入_判断点说明.md")
+    if (out/"穿透回报率_输入.json").exists() and not args.overwrite:
+        sys.exit("输入已存在，保留人工判断；确需重建时显式加 --overwrite")
+    data = Path(args.data)
+    pnl, cf, bs = [annual_rows(pd.read_csv(data/name,encoding="utf-8-sig")) for name in
+                   ("利润表_按报告期.csv","现金流量表_按报告期.csv","资产负债表_按报告期.csv")]
+    if any(frame.empty for frame in (pnl,cf,bs)):
+        raise ValueError("三表缺少完整财年")
+    latests = [frame["REPORT_DATE"].max() for frame in (pnl,cf,bs)]
+    if len(set(latests))!=1:
+        raise ValueError("三表最新完整财年不一致，禁止跨期拼接")
+    dates = sorted(set(pnl["REPORT_DATE"]) & set(cf["REPORT_DATE"]) & set(bs["REPORT_DATE"]))[-5:]
+    if len(dates)<5:
+        raise ValueError("三表可比完整财年不足5年")
+    pnl,cf,bs = [frame.set_index("REPORT_DATE").loc[dates].reset_index() for frame in (pnl,cf,bs)]
+    newest = lambda values: list(reversed(values))
+    revenues = newest(val_mm(pnl,"OPERATE_INCOME"))
+    profits = newest(val_mm(pnl,"PARENT_NETPROFIT"))
+    depreciation = newest([depreciation_amount(row) for _,row in cf.iterrows()])
+    if any(value is None for value in depreciation):
+        raise ValueError("折旧摊销核心字段缺失，无法生成G/AA；请补齐总额或明细，禁止填0")
+    capex = newest(val_mm(cf,"CONSTRUCT_LONG_ASSET"))
+    ocf = newest(val_mm(cf,"NETCASH_OPERATE"))
+    eps = newest(val_per_share(pnl,"BASIC_EPS" if "BASIC_EPS" in pnl.columns else "EPSJB"))
+    g_ratios = [c/d for c,d in zip(capex[:3],depreciation[:3]) if d>0]
+    if not g_ratios:
+        raise ValueError("Capex/D不可识别，G须人工判断")
+    g = round(sum(g_ratios)/len(g_ratios),3)
+    surplus = [o-d*g for o,d in zip(ocf,depreciation)]
+    shares, profile_cap = shares_from_profile(data)
+    shares_source = "公司概况.csv" if shares else "资产负债表SHARE_CAPITAL"
+    if shares is None:
+        shares = amount_at(bs.iloc[-1],"SHARE_CAPITAL")
+    if shares is None or shares<=0:
+        shares = profits[0]/eps[0] if eps[0]>0 else None
+        shares_source = "C/EPS反推（待核）"
+    if shares is None or shares<=0:
+        raise ValueError("股本不可判定")
+    div = pd.read_csv(data/"分红送配记录.csv",encoding="utf-8-sig")
+    dps = dps_by_fiscal_year(div)
+    years = [dt.year for dt in reversed(dates)]
+    m2 = [float(dps.loc[y])*shares/profits[i] for i,y in enumerate(years[:3]) if y in dps.index and profits[i]>0]
+    m1 = [float(dps.loc[y])/eps[i] for i,y in enumerate(years[:3]) if y in dps.index and eps[i]>0]
+    payout = args.payout if args.payout is not None else min(m2) if m2 else None
+    if payout is None or not 0<=payout<=1:
+        raise ValueError("支付率不可判定或超出0~1；须核查分红与股本后用--payout明确输入")
+    daily = pd.read_csv(data/"日线股价.csv",encoding="utf-8-sig")
+    date_col = "日期" if "日期" in daily.columns else "date"
+    daily[date_col] = pd.to_datetime(daily[date_col],errors="raise")
+    daily = daily.sort_values(date_col)
+    price = args.price if args.price is not None else float(daily[close_col(daily)].iloc[-1])
+    if not math.isfinite(price) or price<=0:
+        raise ValueError("现价无效")
+    cap = price*shares
+    snapshot = financial_snapshot(bs.iloc[-1],pnl.iloc[-1],depreciation[0])
+    warnings = snapshot["input_warnings"]
+    warnings.extend(["G为总资本开支/折旧代理，不等于已确认的维持性资本开支；扩产期须人工判断",
+                     "十年低价未核实复权因子及十年覆盖，默认null，不能仅以正价格启用",
+                     "Rf默认或传入值仍须核对估值日；货币资金须补核受限资金"])
+    if len(m2)<3:
+        warnings.append("历史支付率不足3个可核实财年，最低档仅为部分观察；须核查缺失年度")
+    if profile_cap and abs(cap-profile_cap)/profile_cap>.03:
+        warnings.append("price×shares与概况市值偏差超过3%，须核对时点及股本")
+    segments = [(surplus[i]-surplus[i+1])/(revenues[i]-revenues[i+1]) for i in range(len(surplus)-1) if revenues[i]!=revenues[i+1]]
+    signs = {1 if v>0 else -1 for v in segments}
+    median = sorted(segments)[len(segments)//2] if segments else None
+    reliable = bool(segments) and len(signs)<=1 and all(abs(v)<=1.5 for v in segments)
+    if median is not None and abs(median)>1e-6 and any(abs(v)>2*abs(median) for v in segments):
+        reliable = False
+    lam = sum(segments)/len(segments) if reliable else 0
+    if not reliable:
+        warnings.append("λ符号矛盾/异常或缺失，按0兜底；敏感性不可解读为收入弹性")
+    cfg = {"schema_version":2,"company":args.company,"code":args.code,"date":str(daily[date_col].max().date()),
+           "price":price,"market_cap":cap,"shares":shares,"net_profit_C":profits[0],"depreciation_D":depreciation[0],
+           "capex_ratio_G":g,"profit_discount_k":.8,"payout_M":payout,"payout_M_min":min(m2) if m2 else None,
+           "payout_M_mean":sum(m2)/len(m2) if m2 else None,"aa_2y":sum(surplus[:2])/2,"aa_all":sum(surplus)/len(surplus),
+           "rf":args.rf,"cycle_adjust_pct":0,"base_revenue":revenues[0],"lambda":lam,"surplus_series":surplus,
+           "revenue_series":revenues,"fcf":ocf[0]-capex[0],"goodwill":amount_at(bs.iloc[-1],"GOODWILL"),
+           "total_assets":amount_at(bs.iloc[-1],"TOTAL_ASSETS"),"dps":float(dps.loc[years[0]]) if years[0] in dps.index else None,
+           "low_10y_close":None,"low_10y_close_verified":False,"financial_period":str(dates[-1].date()),**snapshot}
     if args.c_fwd is not None:
-        print(f"   成长校准轨: C_fwd={args.c_fwd}亿 M_fwd={cfg.get('payout_M_fwd','(默认)')} "
-              f"k_fwd={cfg.get('profit_discount_k_fwd','(默认0.85)')} 来源={args.c_fwd_source or '未标注'}")
+        cfg.update(net_profit_C_fwd=args.c_fwd*100,c_fwd_source=args.c_fwd_source,c_fwd_verified=False)
+        for key,value in (("payout_M_fwd",args.m_fwd),("profit_discount_k_fwd",args.k_fwd),("aa_fwd",args.aa_fwd*100 if args.aa_fwd is not None else None)):
+            if value is not None:
+                cfg[key]=value
+    notes = [f"# 穿透回报率输入判断说明（{args.company} {args.code}）", "",
+             f"财务期：{cfg['financial_period']}；行情日：{cfg['date']}；股本来源：{shares_source}。",
+             "机器JSON金额单位为百万元。所有缺失保留null，确认判断点后再运行计算器。", "",
+             f"G建议：{g}；近三年Capex/D：{g_ratios}", f"支付率法2：{m2}；法1：{m1}；采纳M：{payout}",
+             f"λ段值：{segments}；有效λ：{lam}", "", "## 公式及来源",
+             *[f"- {key}: {value}" for key,value in snapshot["formula_sources"].items()], "", "## 需核实及警告",
+             *["- "+warning for warning in warnings], "",
+             "不得将营运资本当现金保护，不得把货币资金命名为净现金。",
+             "核实维持性开支、支付率承诺、AA窗口、Rf、现金/融资范围、普通股权益、低价复权证据。"]
+    from run_support import atomic_json
+    atomic_json(out/"穿透回报率_输入.json",cfg)
+    (out/"输入_判断点说明.md").write_text("\n".join(notes)+"\n",encoding="utf-8")
+    print(f"已生成 {out/'穿透回报率_输入.json'}；警告{len(warnings)}项，未覆盖既有人工输入")
 
 
 if __name__ == "__main__":

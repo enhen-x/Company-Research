@@ -1,185 +1,39 @@
-# 估值分析模块 v2.0 — 协调器（Coordinator）
+﻿# 独立估值计算协调器（V3适配）
 
-> **角色**：你是项目经理。职责：(1) 验证输入并补全缺失信息；(2) 检查前置条件（定性报告）；(3) 调度 Python 计算 → LLM 定性调整；(4) 监控超时；(5) 交付最终估值报告。你不执行估值计算或数学运算。
->
-> 本模块依赖 `/business-analysis` 的输出（qualitative_report.md + data_pack_market.md）。
+本模块是可选计算入口。V3常规调研继续使用同一批次的 data/input/reports 和十章主报告；不要求先生成旧版商业分析报告，也不另建 output 目录或平行主报告。先读 `references/research-topics.md` 和 `references/估值方法详解.md` 选择行业主方法与交叉方法。19类行业配置负责适用性路由，不能解释为19套完整数值引擎。
 
----
+## 1. 复用已有输入
 
-## 输入解析
+先检查本批次的 `input/研究模型.json`、`reports/研究模型_输出.json`、现有估值计算及原始披露。专题脚本可复算经营驱动、现金桥及选型规则，不能将订单总额或管理层目标直接当作收入与独立预测。已存在并可核验的计算优先引用，不重复抓取同一份财务数据。
 
-| 输入项 | 示例 | 必需？ |
-|--------|------|--------|
-| 股票代码或名称 | `600887` / `伊利股份` / `00700.HK` / `AAPL` | 必需 |
+`scripts/valuation_engine.py --dir <批次>` 可离线复用已验证来源与标的的 A 股 B2 CSV，通过 `valuation_snapshot.py` 适配已支持的东财三表、财务指标及概况/行情/分红格式，不读取Token、不导入供应商、不联网。未知来源、单位、币种、标的或格式拒绝推断；缺失债务或现金流项目仍保留缺失。港美股、其他CSV格式和行业专用引擎尚未接入这一适配。旧 `--code/--output-dir` 供应商入口保留兼容，仅在当前批次确无数据且需要受支持方法时使用，不为运行该入口重复生成数据包。特殊行业没有实现的NAV、AFFO、寿险EV等，需引用单独可复算的计算与证据；禁止强套一般工业DCF。
 
-**解析规则**：
-1. 代码格式化：A股 → `XXXXXX.SH/SZ`；港股 → `XXXXX.HK`；美股 → `AAPL`
-2. 若用户只给了 6 位数字 → 由 `scripts/config.py` 自动补充后缀
-3. 若模糊 → AskUserQuestion 确认
+## 2. 显式现金流契约
 
----
+需要独立引擎的DCF/EPV/反向DCF时，将本次估值约定保存在批次唯一 `input/估值口径.json`，通过 `--contract` 读取。至少明确：
 
-## 前置条件检查
+- `cashflow_basis`: FCFF或FCFE；`currency`: CNY/HKD/USD；`amount_unit`: raw或million。
+- `discount_rates`: `wacc_pct` / `ke_pct`（百分数，如8表示8%）与 `evidence_id`。FCFF对应WACC，FCFE对应Ke。
+- FCFF的 `equity_bridge` 明确 cash、debt、other_equity_adjustment、evidence_id；FCFE必须 `cashflow_scope=parent_common`，不能重复加现金减债务。
+- `historical_source=explicit` 时提供 `historical_cashflows`，每项含 period、value、evidence_id；provider/ocf路径必须满足实现中的口径校验。OCF路径还需显式 `ocf_interest_classification` 及逐期 `ocf_adjustments`，不能默认经营现金流减资本开支就是FCFF。
+- `stable_growth_pct` / `terminal_growth_pct`；终值增长率必须低于对应折现率。三情景提供 optimistic/base/pessimistic，各含 cashflows、probability、evidence_id，不以净利润增长率代替现金流预测。
 
-```
-{output_dir} = {workspace}/output/{code}_{company}
-```
+缺少口径或关键数值返回 INSUFFICIENT_DATA，保留限制，不补零或自动猜测。财务费用净额不能替代费用化利息；EBITDA采用税前利润＋明确利息＋折旧摊销。
 
-**必须存在**：
-1. `{output_dir}/qualitative_report.md` — 定性分析报告（含结构化参数表）
-2. `{output_dir}/data_pack_market.md` — Tushare 数据包
+## 3. 执行与结果核对
 
-| 条件 | 操作 |
-|------|------|
-| 两个文件都存在 | 继续执行 |
-| 任一文件缺失 | **停止执行**，输出提示 |
-
-缺失时的提示：
-```
-⚠️ 前置条件不满足：未找到 qualitative_report.md 和/或 data_pack_market.md
-请先运行 /business-analysis {stock_code} 生成定性分析报告和数据包。
+```powershell
+python <skill>/scripts/valuation_engine.py --dir <批次> --contract input/估值口径.json --total-timeout 180
 ```
 
-> 注意：如果用户已有数据但 output 目录名与代码不匹配（例如手动重命名），需要确认目录路径。
+外层在导入供应商与数据处理库之前启动180秒硬预算，终止超时进程树；失败保留已有结果但不能标记本轮更新成功。唯一辅助输出 `reports/valuation_computed.md` 同内容不重复改写。不递归重试；缺口应回到原始披露与输入契约。
 
----
+核对计算采用的期间、币种、股本、现金流范围、债务及少数股东权益。情景和概率必须来自本次独立假设，不能事后选择最接近现价的情景。定性调整须写明证据、变更参数与重算结果，禁止用文字覆盖脚本数值。
 
-## 阶段调度
+`reverse_valuation.five_year_dcf` 与稳定DCF共用五年现金流路径、折现函数和FCFF/FCFE价值桥，仅固定其他条件反解初始增长率；必须显式给出 `terminal_growth_pct`。`reverse_growth_bounds_pct` 可设两个有序增长边界，默认[-99,300]，最多100次二分，不自动扩界。越界/未收敛分别显示 `NO_SOLUTION` / `NO_CONVERGENCE`，输出正算重建值及误差。Gordon永续反解仍单列为稳态诊断，不解释为五年驱动或多变量反解。该能力不替代银行、矿山或订单转化的行业专用反向模型。
 
-```
-┌─────────────────────────────────────────────────┐
-│              用户输入解析                          │
-│   股票代码 = {code}, 公司名称 = {company}         │
-└──────────┬──────────────────────────────────────┘
-           │
-           ▼
-┌─────────────────────────────────────────────────┐
-│  前置检查                                         │
-│  qualitative_report.md 存在? ✓                   │
-│  data_pack_market.md 存在? ✓                     │
-└──────────┬──────────────────────────────────────┘
-           │
-           ▼
-┌─────────────────────────────────────────────────┐
-│  Step 1: Python 估值计算                          │
-│  valuation_engine.py → valuation_computed.md      │
-│  (分类 + WACC + 全部估值方法 + 敏感性表)           │
-└──────────┬──────────────────────────────────────┘
-           │
-           ▼
-┌─────────────────────────────────────────────────┐
-│  Step 2: LLM 定性调整与报告                       │
-│  读取 qualitative_report.md + valuation_computed  │
-│  → 定性调整 → 选择情景 → 组装报告                  │
-│  → {company}_{code}_估值报告.md                   │
-└──────────────────────────────────────────────────┘
-```
+## 4. 回填原章节
 
----
+结果写入原 §6.1–§6.4，与 §5 的经营预测勾稽，更新 §1 摘要、§7 双轨结论、§8 触发阈值及 §9 反方验证。各章、各小节和图号保持 `references/report-template.md` 原结构。报告引用实际计算路径及数据限制。
 
-## Step 1: Python 估值计算
-
-### 执行命令
-
-```bash
-cd {workspace}
-python3 scripts/valuation_engine.py --code {ts_code} --output-dir {output_dir}
-```
-
-### 输出
-- `{output_dir}/valuation_computed.md` — 包含：
-  - 公司分类（蓝筹价值型/成长型/混合型）+ 选定方法
-  - WACC 完整计算
-  - 各估值方法的详细结果 + 5×5 敏感性矩阵
-  - 交叉验证（初步，未经定性调整）
-  - 关键假设清单（标注哪些待定性调整）
-
-### 超时：3 分钟
-失败 → 检查 TUSHARE_TOKEN 是否设置，提示用户重试。
-
----
-
-## Step 2: LLM 定性调整与报告
-
-### 读取文件
-
-按顺序读取以下文件的**完整内容**：
-
-1. `strategies/valuation/phase2_valuation.md` — 定性调整执行指令
-2. `strategies/valuation/references/valuation_methods.md` — 方法论参考
-3. `strategies/valuation/references/report_template.md` — 报告模板
-4. `{output_dir}/qualitative_report.md` — 定性分析报告
-5. `{output_dir}/valuation_computed.md` — Python 计算结果
-6. `{output_dir}/data_pack_market.md` — 原始数据包（备查）
-
-### 执行
-
-按 `phase2_valuation.md` 指令执行：
-1. 提取定性参数和叙述洞察
-2. 对每个关键假设执行定性调整
-3. 从敏感性矩阵中选择调整后的情景
-4. 组装最终报告
-
-### 输出
-
-`{output_dir}/{company}_{code}_估值报告.md`
-
-### 结果检查
-
-确认报告包含：
-- Executive Summary
-- 定性调整说明（每个假设的 before/after）
-- 估值方法详情（引用 Python 计算结果）
-- 交叉验证（调整后）
-- 估值结论
-- 免责声明
-
-### 超时：5 分钟
-超时 → 输出已完成的部分结果。
-
----
-
-## 完成交付
-
-```
-估值分析完成 ✅
-
-📊 {公司名称}（{股票代码}）
-📁 报告路径: {output_dir}/{company}_{code}_估值报告.md
-
-公司类型: {type}
-估值方法: {methods}
-Python初步估值: {python_central} {币种}/股
-定性调整后估值: {adjusted_central} {币种}/股
-当前股价: {price} {币种}/股
-估值判断: {judgment}
-```
-
----
-
-## 异常处理
-
-| 阶段 | 异常 | 处理 |
-|------|------|------|
-| 输入 | 代码为空 | AskUserQuestion |
-| 前置检查 | qualitative_report.md 缺失 | 停止，提示 /business-analysis |
-| 前置检查 | data_pack_market.md 缺失 | 停止，提示 /business-analysis |
-| Step 1 | TUSHARE_TOKEN 缺失 | 停止，提示设置 Token |
-| Step 1 | valuation_engine.py 报错 | 展示错误信息，提示用户检查 |
-| Step 1 | 超时 | 停止，提示重试 |
-| Step 2 | qualitative_report.md 格式异常 | 跳过定性调整，直接用 Python 结果 |
-| Step 2 | 某方法在 computed 中缺失 | 正常（已被 Python 跳过） |
-| Step 2 | 超时 | 输出已完成部分 |
-
----
-
-## 文件路径约定
-
-```
-{workspace}     = 项目根目录
-{strategy_dir}  = {workspace}/strategies/valuation
-{output_dir}    = {workspace}/output/{code}_{company}
-{computed}      = {output_dir}/valuation_computed.md
-{qualitative}   = {output_dir}/qualitative_report.md
-{report}        = {output_dir}/{company}_{code}_估值报告.md
-```
+完成后使用本批次 `scripts/gate_all.py`，必要时加 `--require-research`；技术PASS与专题结构检查不等于人工投资判断已完成。完整交付规则以 `references/flow-contract.md` 为准。

@@ -23,13 +23,16 @@
 | 字段 | 口径 | 来源列（东财按报告期 CSV） |
 |------|------|---------------------------|
 | C 归母净利 | 最新年报 | 利润表 `PARENT_NETPROFIT` |
-| D 折旧摊销 | **含使用权摊销**（2021+ 租赁准则，实质折旧费用；水星家纺手填 93.6 = 41.9+6.2+18.0+27.5 确认含此项） | 现金流量表 `FA_IR_DEPR + IA_AMORTIZE + LPE_AMORTIZE + USERIGHT_ASSET_AMORTIZE` |
+| D 折旧摊销 | 总额优先；无总额时使用完整明细，缺失不得填0 | `DEPR_AMORT`/`TOTAL_DEPR_AMORT`，或 `FA_IR_DEPR + IA_AMORTIZE + LPE_AMORTIZE` 加已披露使用权摊销；`FA_IR_DEPR`已含油气折耗，不能再加`OILGAS_BIO_DEPR` |
 | G 建议 | 近3年 Capex/D&A 均值（含使用权摊销同口径） | 现金流量表 `CONSTRUCT_LONG_ASSET` |
 | M 法2 | 近3年 **DPS×股本/归母净利**（均值/最低档；无承诺时取最低档） | 分红记录（比例列÷10 = 每股派息）+ 资产负债表 `SHARE_CAPITAL` |
 | M 法1 | 近3年 DPS/EPS 均值（EPS 为元/股，**不做单位转换**） | 分红记录 + 利润表 `BASIC_EPS` |
 | surplus/AA | OCF − D×G（G 采用建议值口径，全链一致） | 现金流量表 `NETCASH_OPERATE` |
-| net_cash 狭义 | 货币资金 | 资产负债表 `MONETARYFUNDS` |
-| net_cash 广义 | 货币资金 + **理财** | 资产负债表 `TRADE_FINASSET_NOTFVTPL`（非交易性金融资产，**不是** TRADE_FINASSET！水星家纺 2025 年报理财 842.8 百万藏在 `NOTFVTPL` 后缀列） |
+| cash_balance | 货币资金，尚未扣债；受限部分及现金等价物范围须另核 | 资产负债表 `MONETARYFUNDS`；理财不能仅凭列名自动视为现金 |
+| net_debt / net_cash_actual | 有息负债−货币资金 / 相反数 | 计算器据现金及债务统一计算；旧`net_cash`仅按历史货币资金语义兼容并警告 |
+| working_capital | 流动资产−流动负债，**不是现金保护锚** | `TOTAL_CURRENT_ASSETS - TOTAL_CURRENT_LIAB` |
+| EBITDA | 税前利润+费用化利息+D，不用营业利润或全部利息列替代 | `TOTAL_PROFIT + FE_INTEREST_EXPENSE + D` |
+| book_equity | 归母普通股权益 | `TOTAL_PARENT_EQUITY - OTHER_EQUITY_TOOL`；任一未知保留null |
 | 有息负债 | 短借+长借+应付债+短融（默认不含租赁） | `SHORT_LOAN + LONG_LOAN + BOND_PAYABLE + SHORT_BOND_PAYABLE` |
 | shares | 股本面值÷1（东财 SHARE_CAPITAL 单位元、面值1元 → 百万股） | 资产负债表 `SHARE_CAPITAL` |
 | market_cap | price × shares（百万元） | — |
@@ -38,12 +41,14 @@
 
 1. **EPS 是元/股，不做 /1e6**——曾把 EPS 除 1e6 导致法1 支付率 = 633589（荒谬值）。
 2. **分红"现金分红-现金分红比例"列值是"每10股派X元"的 X，必须 ÷10 得 DPS**；同财年多个报告期（年报+中期）要合计——水星家纺 2025 年 = 年报 0.8 + 中期 0.2 = 1.0。
-3. **分配股利支付的现金（ASSIGN_DIVIDEND_PORFIT）含偿付利息，禁用作法2**——会低估支付率（水星家纺：含息口径 0.57 vs DPS×股本 0.638）。
+3. **分配股利支付的现金（ASSIGN_DIVIDEND_PORFIT）含偿付利息，禁用作法2**——另有少数股东归属、实际支付与分红财年时点差异，不能直接代替普通股DPS×股本。
 4. **序列方向**：reversed 后"由新到旧"，取近3年用 `[:3]` 不是 `[-3:]`（曾取到最早 3 年 → G=2.493）。
-5. **NaN 陷阱**：列存在但值为 NaN 时 `float(x or 0)` 无效（NaN 是 truthy）——必须 `pd.to_numeric+fillna(0)`；曾导致 net_cash/有息负债输出 nan。
+5. **NaN 陷阱**：列存在但值为NaN时 `float(x or 0)` 无效；先校验有限数值。核心C/D/收入/OCF/Capex缺失拒绝生成，现金/债务/权益等未知保留null，**不能用fillna(0)伪装已知零**。
 6. **理财列名**：`TRADE_FINASSET_NOTFVTPL`（以公允价值计量且其变动计入当期损益的非交易性金融资产）；`TRADE_FINASSET`/`FVTPL_FINASSET`/`APPOINT_FVTPL_FINASSET` 在水星家纺全为 NaN，查空后先检查是否有 `NOTFVTPL` 后缀列。
 7. **资产负债表季报陷阱**：东财 CSV 按报告期含季报行（2026-03-31 等），必须过滤 `month==12` 取年报；曾把 2026Q1 货币资金 572.2 当年报 874.1。
-8. **分红记录方向**：`stock_fhps_detail_em` 返回最新在前，取最新财年用 `iloc[0]` 后按报告期年份分组。
+8. **分红记录方向**：不能依赖接口行序，按报告期财年分组并与相同财年利润对应；三表按共同最近5个完整财年对齐，最新完整财年不同则拒绝拼接。
+9. **价格锚核实**：现金保护与十年最低收盘价默认null；只有正数、`cash_protection_verified`/`low_10y_close_verified=true`且对应`*_source`非空才启用。营运资本不是现金保护；正的前复权低价不能证明十年覆盖及复权正确。
+10. **G网格命名**：`oe_yield=OE×M/市值`，网格中的`GG`仅为历史兼容别名，不能写成基准现金`GG=AA×M/市值`；G仍是总Capex/D代理，维持性开支须人工核实。AA≤0时扣现金PE不适用。
 
 ## 四、人判断点清单（生成器输出 输入_判断点说明.md 逐项列出）
 
@@ -53,7 +58,7 @@
 | 2 | M 法1 vs 法2 | 法2；两法偏差 ≤5pct 时法1 作参考 | DPS×股本/净利 vs DPS/EPS 交叉验证 | 水星家纺 0.638 vs 0.634（偏差 <1pct，两法互证） |
 | 3 | k 利润折扣系数 | 0.8（默认）；强可预测0.9/中0.8/弱0.7 | 可预测性评级（因子3 步骤11）；保守方向取小值，存疑降档 | k 0.9 vs 0.7 → R* 相差 ±（C×0.1×M/市值）pct，目标买入价同比例变动 |
 | 4 | AA 用 2y 还是 all | AA_2y（近2年） | 近2年无异常年；AA_all 被早期负 OCF 年稀释 | 418.7 vs 214.6 |
-| 5 | net_cash 狭义 vs 广义 | methodology 默认狭义；用广义必须说明理由 | 理财（非交易性金融资产）为主业外闲置资金，变现快 → 可视为现金等价物，但口径变更要写进报告 | 8.74 亿 vs 17.17 亿（净现金/市值 19% vs 35%） |
+| 5 | 现金/融资范围 | 核实受限资金、现金等价物和租赁/一年内到期等债务 | 理财须核期限、流动性及受限情况，不能自动加入现金；净债务始终只扣一次 | 现金范围影响EV/净债务及保护锚，须给出可复核桥表 |
 | 6 | rf 取值 | 当日 10 年期国债收益率 | 官方公布值；无法确认时用估计并标注 | ±0.5pct → 门槛 II ±0.5pct → 目标买入价同比变动 |
 | 7 | cycle_adjust | 弱周期=0 | 家纺弱周期 | 0 |
 | 8 | λ 可信度 | 脚本自动诊断（符号一致性+单段主导度） | 2022 疫情年 OCF 异常主导 → 降级"保守参考" | λ 仅用于敏感性表，不进主链 |
@@ -69,10 +74,12 @@
 ```
 1. 数据拉取完成后：python scripts/build_penetration_input.py \
        --data <项目>/data --out <项目>/input --company <名称> --code <代码> [--rf 0.017] [--price 17.85]
-2. 人工核对 output 的 输入_判断点说明.md：逐项确认人判断点（G/M/k/AA/net_cash/rf/cycle_adjust/λ）
+2. 人工核对输出的 输入_判断点说明.md：逐项确认G/M/k/AA、cash_balance/债务范围、普通股权益、价格锚、rf/cycle_adjust/λ；缺失支付率须先核实再用--payout传入
 3. 确认后运行：python scripts/calc_penetration_return.py --config input/穿透回报率_输入.json --json
 4. 生成器已输出 input/穿透回报率_输入.json（机器口径）；如需保守情景改 G 后重跑计算器
 ```
+
+生成器默认不覆盖已有人工确认输入，确需重建才显式加`--overwrite`。升级计算器时优先读取原输入复算并对比核心结论，不为字段迁移重建覆盖人工判断。历史验证表中的`net_cash`是旧货币资金命名，不能当真实净现金复用。
 
 ## 六、验证对齐清单（水星家纺基线，新公司需重新建立）
 

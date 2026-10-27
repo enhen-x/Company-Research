@@ -201,7 +201,10 @@ Task(prompt="""
   数据包：{output_dir}/data_pack_market.md + data_pack_report.md(若有) + data_pack_report_interim.md(若有)
   参考文件：{prompts_dir}/references/
   输出：{output_dir}/{company}_{code}_分析报告.md
-  规则：百万元+千位逗号 | §3P/§4P 母公司报表 | 无PDF→降级方案 | 中报数据优先用于P2/P3/P6
+  规则：先读取 references/report-template.md v3；主报告固定十部分，
+  每章含数据依据和本节结论，§4固定拆为§4.1-§4.4；
+  百万元+千位逗号 | §3P/§4P 母公司报表 | 无PDF→降级方案 | 中报数据优先用于P2/P3/P6；
+  成稿后运行 scripts/report_template_qc.py
 """)
 ```
 
@@ -370,7 +373,7 @@ mkdir -p {workspace}/output/{code}_{company}
 
 ### 金额单位转换
 
-所有阶段（Phase 1/2/3）的金额统一为 **百万元**（Tushare 原始单位元 ÷ 1e6）。
+各阶段的数据包、计算输入与既有机器JSON金额采用 **百万元**（Tushare 原始单位元 ÷ 1e6），保持内部尺度。Phase 3对外正文、表格、图注和阅读台账金额必须从其原尺度换算为**亿元／万元**；自适应单位逐格写明，股数用亿股／万股。不得直接复制内部百万尺度到主报告；以`references/report-template.md`的显示契约为准。
 
 | 原始单位 | 转换方法 | 示例 |
 |---------|---------|------|

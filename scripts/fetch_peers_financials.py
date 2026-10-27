@@ -109,8 +109,8 @@ def _pb_or_none(f: list[str]) -> float | None:
         return None
 
 
-def f10_annual(code: str, mkt: str) -> dict | None:
-    """途径1：东财 F10 主财务数据（累计年报口径，HTTP 直连绕开 akshare 限流）"""
+def f10_annual(code: str, mkt: str, period: str = "annual") -> dict | None:
+    """F10 cumulative accounts; period=annual/latest/YYYY-MM-DD (no YTD annualisation)."""
     url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
     params = {
         "reportName": "RPT_F10_FINANCE_MAINFINADATA",
@@ -125,7 +125,12 @@ def f10_annual(code: str, mkt: str) -> dict | None:
         return None
     df = pd.DataFrame(rows)
     df["REPORT_DATE"] = pd.to_datetime(df["REPORT_DATE"])
-    ann = df[df["REPORT_DATE"].dt.month == 12].sort_values("REPORT_DATE")
+    if period == "annual":
+        ann = df[df["REPORT_DATE"].dt.month == 12].sort_values("REPORT_DATE")
+    elif period == "latest":
+        ann = df.sort_values("REPORT_DATE")
+    else:
+        ann = df[df["REPORT_DATE"] == pd.Timestamp(period)].sort_values("REPORT_DATE")
     if ann.empty:
         return None
     last = ann.iloc[-1]
@@ -141,8 +146,9 @@ def f10_annual(code: str, mkt: str) -> dict | None:
     rev_亿 = rev_亿 / 1e8 if rev_亿 is not None else None
     rev_tz = first_num(last, ["TOTALOPERATEREVETZ", "OI_YOYRATIO_PK"])
     np_tz = first_num(last, ["PARENTNETPROFITTZ"])
-    if len(ann) >= 2:
-        prev = ann.iloc[-2]
+    previous = df[df["REPORT_DATE"] == last["REPORT_DATE"] - pd.DateOffset(years=1)]
+    if not previous.empty:
+        prev = previous.iloc[-1]
         prev_rev = first_num(prev, ["TOTALOPERATEREVE", "OPERATE_INCOME_PK"])
         prev_np = first_num(prev, ["PARENTNETPROFIT"])
         if rev_tz is None and rev_亿 is not None and prev_rev:
@@ -155,7 +161,7 @@ def f10_annual(code: str, mkt: str) -> dict | None:
         "营收(亿)": rev_亿,
         "营收增速%": round(rev_tz, 2) if rev_tz is not None else None,
         "净利增速%": round(np_tz, 2) if np_tz is not None else None,
-        "数据来源": "F10主财务",
+        "数据来源": "F10主财务（累计实际，非年化）",
     }
 
 
@@ -280,6 +286,7 @@ def main() -> int:
     ap.add_argument("--dir", required=True, help="项目目录（含 data/）")
     ap.add_argument("--peers", required=True, help='"代码:名称,代码:名称"')
     ap.add_argument("--keep", action="store_true", help="不备份已存在的汇总 CSV")
+    ap.add_argument("--period", default="latest", help="latest（默认）/annual/共同报告期YYYY-MM-DD；中期值禁止当全年")
     args = ap.parse_args()
 
     data_dir = Path(args.dir) / "data"
@@ -320,19 +327,19 @@ def main() -> int:
             p(f"[HK] {name}: 港股财务数据无 A 股接口，需联网搜索补齐（BPS/DPS/归母净利/ROE）")
         else:
             try:
-                got = f10_annual(code, market)
+                got = f10_annual(code, market, args.period)
                 if got:
                     p(f"[OK] {name}: F10 {got['报告期']} EPS={got['EPS']} BPS={got['BPS']} ROE={got['ROE加权%']}")
             except Exception as exc:
                 p(f"[降级] {name} F10 失败: {exc}")
-            if not got:
+            if not got and args.period == "annual":
                 try:
                     got = ind_annual(code, market)
                     if got:
                         p(f"[OK] {name}: 财务指标接口(单季求和) {got['报告期']} EPS={got['EPS']} BPS={got['BPS']}")
                 except Exception as exc:
                     p(f"[降级] {name} 财务指标接口失败: {exc}")
-            if not got:
+            if not got and args.period == "annual":
                 try:
                     got = sheets_annual(code)
                     if got:
@@ -371,7 +378,7 @@ def main() -> int:
         p("[WARN] 未获取任何同行财务数据，未生成汇总 CSV")
 
     if failures:
-        p("\n[兜底提示] 请用联网搜索补齐以下同行年报数据（2025 年报口径）并手工写入 CSV：")
+        p(f"\n[兜底提示] 请用公司公告补齐同行 {args.period} 数据；禁止静默回退旧年报或混用期间：")
         p("  港股（.HK 前缀）行情已自动取，但需手工补齐：每股净资产 BPS、全年每股股息 DPS、归母净利、ROE")
         p("  每股净资产 BPS、全年每股股息 DPS、归母净利、ROE（来源：公司年报摘要/利润分配公告）")
         return 1

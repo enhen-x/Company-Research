@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -37,6 +38,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+from run_support import run_process
 
 SKILL_SCRIPTS = Path(__file__).resolve().parent
 CODE = "600415"
@@ -184,12 +187,12 @@ def write_ops(proj: Path) -> None:
             "D_A": [5.2, 5.2, 5.2, 6.2, 6.2, 7.2, 8.2, 9.2, 9.2, 10.2],
         },
         "peers": [
-            {"公司": "轻纺城", "PE": 16.1, "PB": 0.84, "ROE": -0.3, "营收增速": -7.6, "净利增速": -111.5, "净利率": None, "高亮": False},
-            {"公司": "海宁皮城", "PE": 102.6, "PB": 0.59, "ROE": 0.8, "营收增速": -3.6, "净利增速": -20.5, "净利率": None, "高亮": False},
-            {"公司": "农产品", "PE": 26.1, "PB": 1.32, "ROE": 5.4, "营收增速": 13.4, "净利增速": -3.4, "净利率": None, "高亮": False},
-            {"公司": "焦点科技", "PE": 21.8, "PB": 4.02, "ROE": 20.6, "营收增速": 15.1, "净利增速": 11.6, "净利率": None, "高亮": False},
-            {"公司": "国联股份", "PE": 9.9, "PB": 1.40, "ROE": 15.6, "营收增速": -4.9, "净利增速": -9.1, "净利率": None, "高亮": False},
-            {"公司": "小商品城", "PE": 15.6, "PB": 2.87, "ROE": 17.5, "营收增速": 26.6, "净利增速": 36.8, "净利率": 21.1, "高亮": True},
+            {"公司": "轻纺城", "PE": 16.1, "PB": 0.84, "ROE": -0.3, "营收增速": -7.6, "净利增速": -111.5, "净利率": None, "标的": False},
+            {"公司": "海宁皮城", "PE": 102.6, "PB": 0.59, "ROE": 0.8, "营收增速": -3.6, "净利增速": -20.5, "净利率": None, "标的": False},
+            {"公司": "农产品", "PE": 26.1, "PB": 1.32, "ROE": 5.4, "营收增速": 13.4, "净利增速": -3.4, "净利率": None, "标的": False},
+            {"公司": "焦点科技", "PE": 21.8, "PB": 4.02, "ROE": 20.6, "营收增速": 15.1, "净利增速": 11.6, "净利率": None, "标的": False},
+            {"公司": "国联股份", "PE": 9.9, "PB": 1.40, "ROE": 15.6, "营收增速": -4.9, "净利增速": -9.1, "净利率": None, "标的": False},
+            {"公司": "小商品城", "PE": 15.6, "PB": 2.87, "ROE": 17.5, "营收增速": 26.6, "净利增速": 36.8, "净利率": 21.1, "标的": True},
         ],
         "targets": {
             "labels": ["当前价", "龟龟目标买入价", "悲观PE 12x", "基准PE 14x", "乐观PE 16x", "券商共识参考"],
@@ -277,17 +280,30 @@ _CHART_TITLES = {
     18: "分部估值SOTP",
 }
 _SECTION_OF = {1: 4, 2: 4, 3: 3, 4: 4, 5: 4, 6: 6, 7: 4, 8: 6, 9: 7, 10: 6, 11: 6, 12: 5, 13: 6, 14: 6, 15: 4, 16: 2, 18: 6}
-_SEC_TITLES = {1: "投资摘要", 2: "行业分析", 3: "公司分析", 4: "财务分析",
-               5: "盈利预测", 6: "估值", 7: "投资建议", 8: "催化剂与跟踪", 9: "风险", 10: "附录"}
+_SEC_TITLES = {1: "投资摘要", 2: "宏观与行业分析", 3: "公司分析", 4: "财务分析",
+               5: "盈利预测", 6: "估值分析", 7: "投资建议与目标价",
+               8: "催化剂与跟踪", 9: "风险与反证条件", 10: "附录"}
 
 
 def build_report(proj: Path) -> Path:
     chart_dir = proj / "reports" / "图表"
     pngs = {int(re.match(r"图(\d{2})", p.name).group(1)): p for p in chart_dir.glob("图*.png")}
     lines = [
-        "# 模板回归测试报告（合成数据）",
+        "# 测试公司（600415.SH）分析报告",
         "",
-        f"> 数据日期：{TODAY} ｜ 用途：skill 模板发布前全图 QC 自检，不构成投资建议",
+        f"> 分析日期：{TODAY} ｜ 当前价：12.48元 ｜ 总市值：10亿元 ｜ 最新财报：{TODAY}",
+        f"> 框架版本：company-research report-template v3 ｜ 数据截至：{TODAY}",
+        "",
+        "### 报告元信息",
+        "",
+        "| 项目 | 内容 |",
+        "|---|---|",
+        f"| 上市结构 | A股；直接持股；股息税率Q=0% |",
+        f"| 总股本 | 8000万股 |",
+        f"| 无风险利率 Rf | 1.70%（合成数据，{TODAY}） |",
+        "| 数据来源 | 合成财务序列、模型 JSON、行业成本价格数据 |",
+        "| 数据审计状态 | PASS |",
+        "| 报告限制 | 合成数据，仅用于模板回归测试 |",
         "",
     ]
     # 按章节组织
@@ -295,29 +311,80 @@ def build_report(proj: Path) -> Path:
     for no in pngs:
         by_sec.setdefault(_SECTION_OF[no], []).append(no)
     for sec in range(1, 11):
-        lines.append(f"## {sec} {_SEC_TITLES[sec]}")
-        lines.append("")
-        if sec == 2:
-            lines.append("### 行业成本与价格走势（图16）")
-            lines.append("")
-            lines.append("**成本与价格解读（合成数据）**：生鲜乳收购价（成本端）自 2024 年初 3.55 元/公斤下行至 2026 年中 3.10 元/公斤，鲜奶平均零售价（价格端）同步缓降，成本降幅大于价格降幅，价差扩大；全国牛奶产量稳中有升，供需宽松支撑成本下行。")
-            lines.append("")
-        if sec == 4:
-            lines.append("### 财务趋势（合成数据）")
-            lines.append("")
+        lines.extend([f"## {sec}. {_SEC_TITLES[sec]}", ""])
+        if sec == 1:
+            lines.extend(["### 1.1 结论先行", "", "**最终结论**：市场轨与龟龟轨同向，合成标的可观察。", "",
+                           "### 1.2 核心数字", "", "12个月目标价、龟龟目标买入价、R_eff、II、KK、仓位与价值陷阱风险均已列入核心数字表。", "",
+                           "### 1.3 核心逻辑、最大优势与最大风险", "", "核心逻辑是需求稳定；最大优势是商业模式；最大风险是估值回撤。", "",
+                           "### 1.4 本节结论", "", "**本节结论**：合成数据支持继续观察。", f"> 数据依据：合成数据序列；截至{TODAY}。", ""])
+        elif sec == 2:
+            lines.extend(["### 2.1 宏观环境", "", "宏观需求、利率和政策通过行业供给与需求影响公司。", "",
+                           "### 2.2 行业空间、生命周期与竞争格局", "", "行业处于成熟生命周期，供给、需求和竞争格局保持稳定。", "",
+                           "### 2.3 量价结构、议价力与政策", "", "价格与成本传导、议价力和政策约束保持可跟踪。", "",
+                           "### 2.4 行业关键跟踪指标", "", "需求、供给和政策指标按月跟踪。", ""])
+        elif sec == 3:
+            lines.extend(["### 3.1 商业模式与公司定位", "", "商业模式清晰，客户、产品、收费、成本与现金回收路径可解释。", "",
+                           "### 3.2 业务分部与单位经济学", "", "分部收入、占比、增速、毛利率和单位经济学已拆分。", "",
+                           "### 3.3 护城河与竞争优势", "", "护城河以规模和成本证据验证。", "",
+                           "### 3.4 管理层、治理与资本配置", "", "管理层、治理和资本配置可追溯。", ""])
+        elif sec == 4:
+            lines.extend([
+                "### §4.1 盈利与资产负债表", "", "盈利、资产负债表和异常项已按年度重建。",
+                "", "**小节结论**：盈利趋势稳定，资产负债表可承受。", f"> 数据依据：合成财务序列；截至{TODAY}。", "",
+                "### §4.2 现金流与盈利质量", "", "现金流、应收、存货、应付、资本开支和自由现金流已分析。",
+                "", "**小节结论**：现金流质量处于可接受区间。", f"> 数据依据：合成现金流序列；截至{TODAY}。", "",
+                "### §4.3 本期财报体检", "",
+                "本期财报体检.json 是本期数字唯一来源。",
+                "#### 4.3.1 本期财报结论先行", "经营改善。",
+                "#### 4.3.2 现金流：赚的是真钱还是账面利润", "现金流与利润同步。",
+                "#### 4.3.3 经营现金流变化原因", "营运资本变化可解释。",
+                "#### 4.3.4 利润波动原因", "利润桥显示费用和收入共同影响。",
+                "#### 4.3.5 存货专项检查", "不适用（合成服务业）。",
+                "#### 4.3.6 非主营投资和金融资产检查", "未发现异常。",
+                "#### 4.3.7 管理层解释与数据验证", "管理层解释与数据一致。",
+                "#### 4.3.8 财务美化/劣化风险信号", "风险信号仅作待核查线索。",
+                "#### 4.3.9 对全年预测和估值的影响", "维持预测。",
+                "", "**小节结论**：本期财报不改变基准判断。", f"> 数据依据：合成体检 JSON 与证据摘要；截至{TODAY}。", "",
+                "### §4.4 同行业比较", "", "同行业比较统一口径并解释差异。",
+                "", "**小节结论**：标的相对同行处于中位。", f"> 数据依据：合成同行数据；截至{TODAY}。", "",
+            ])
+        elif sec == 5:
+            lines.extend(["### 5.1 预测方法与驱动桥", "", "事实、假设、模型、结果和跟踪指标形成收入到 EPS 的驱动桥。", "",
+                           "### 5.2 关键假设与可跟踪指标", "", "假设均有历史依据和跟踪指标。", "",
+                           "### 5.3 三情景预测", "", "悲观、基准、乐观三情景带概率。", "",
+                           "### 5.4 现实检查与敏感性", "", "敏感性检查不存在曲棍球棒。", ""])
+        elif sec == 6:
+            lines.extend(["### 6.1 市场估值与双锚", "", "PE、PB、DCF 双锚与适用性已说明。", "",
+                           "### 6.2 SOTP 分部估值（适用时）", "", "SOTP 估值不适用时保留原因。", "",
+                           "### 6.3 龟龟穿透回报率", "", "R_eff、II、KK、龟龟目标买入价和现金校验已引用 JSON。", "",
+                           "### 6.4 估值结论与安全边际", "", "目标价、目标买入价和门槛价格口径分离。", ""])
+        elif sec == 7:
+            lines.extend(["### 7.1 双轨评级", "", "市场/券商轨与龟龟轨并列，门槛价格单独列示。", "",
+                           "### 7.2 12个月三情景目标价", "", "悲观、基准、乐观概率加权目标价已列示。", "",
+                           "### 7.3 仓位与执行条件", "", "仓位由 KK、可信度、陷阱风险和价格条件推导。", ""])
+        elif sec == 8:
+            lines.extend(["### 8.1 催化剂", "", "催化剂有时间窗口和兑现指标。", "",
+                           "### 8.2 跟踪验证台账", "", "跟踪验证台账有基线、验证时点和触发动作。", ""])
+        elif sec == 9:
+            lines.extend(["### 9.1 风险矩阵", "", "风险概率及方法、影响路径和量化影响已列示。", "",
+                           "### 9.2 尾部压力测试", "", "尾部情景评估回撤。", "",
+                           "### 9.3 待验证事项与数据局限", "", "反证条件和待验证事项已列示。", ""])
+        elif sec == 10:
+            lines.extend(["### 10.1 数据来源与口径", "", "数据来源已列示。", "",
+                           "### 10.2 方法与公式", "", "方法与公式已列示。", "",
+                           "### 10.3 图表清单", ""])
         for no in sorted(by_sec.get(sec, [])):
             lines.append(f"![图{no:02d} {_CHART_TITLES[no]}](图表/{pngs[no].name})")
             lines.append("")
-    # 附录清单
-    lines.append("## 10 附录")
-    lines.append("")
-    lines.append("### 图表清单")
-    lines.append("")
-    lines.append("| 图号 | 名称 | 章节 | 数据日期 |")
-    lines.append("|---|---|---|---|")
-    for no in sorted(pngs):
-        lines.append(f"| 图{no:02d} | {_CHART_TITLES[no]} | §{_SECTION_OF[no]} | {TODAY} |")
-    lines.append("")
+        if 2 <= sec <= 9:
+            lines.extend([f"**本节结论**：第 {sec} 章结论已由合成证据支持。", f"> 数据依据：合成数据与脚本输出；截至{TODAY}。", ""])
+        if sec == 10:
+            lines.extend(["| 图号 | 名称 | 章节 | 数据日期 |", "|---|---|---|---|"])
+            for no in sorted(pngs):
+                lines.append(f"| 图{no:02d} | {_CHART_TITLES[no]} | §{_SECTION_OF[no]} | {TODAY} |")
+            lines.extend(["", "### 10.4 复验与版本记录", "", "复验计划和模板版本已记录。", "",
+                           "### 10.5 免责声明", "", "本报告仅用于模板回归测试，不构成投资建议。", "",
+                           "### 10.6 本节结论", "", "**本节结论**：模板回归报告结构完整。", f"> 数据依据：合成数据和脚本输出；截至{TODAY}。", ""])
     md = proj / "reports" / f"{NAME}_{CODE}_分析报告.md"
     md.write_text("\n".join(lines), encoding="utf-8")
     return md
@@ -344,50 +411,104 @@ def render_html(md_path: Path) -> Path:
 
 # ───────────────────────── 主流程 ─────────────────────────
 
-def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
+def run(cmd: list[str], *, timeout=300, heartbeat=10, label="模板回归阶段") -> subprocess.CompletedProcess:
     print("$", " ".join(str(c) for c in cmd), flush=True)
-    return subprocess.run([str(c) for c in cmd], **kw)
+    command = [str(c) for c in cmd]
+    result = run_process(command, timeout=timeout, heartbeat=heartbeat, label=label)
+    if result["status"] == "TIMEOUT":
+        raise TimeoutError(f"{label} exceeded {timeout:g}s")
+    code = result.get("exit_code")
+    return subprocess.CompletedProcess(command, code if code is not None else 2,
+                                       stdout=result.get("output", ""), stderr="")
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="模板回归测试：合成项目 -> 出图 -> 报告 -> chart_qc")
-    ap.add_argument("--out", default=None, help="项目输出目录（默认系统临时目录）")
-    ap.add_argument("--templates-dir", default=None, help="analyze_charts/chart_qc 所在目录（默认本脚本同目录）")
-    ap.add_argument("--keep", action="store_true", help="保留临时项目")
-    ap.add_argument("--selfcheck", action="store_true", help="负向自检：注入旧 bug，断言 chart_qc FAIL")
-    args = ap.parse_args()
+def injected_layout_bug_detected(returncode: int, output: str) -> bool:
+    """Only the intended QC finding counts; an import/runtime crash is no evidence."""
+    return (returncode == 1 and "Traceback (most recent call last)" not in output
+            and bool(re.search(r"\[FAIL\].*G8-RENDER: 图04.*(?:重叠|不合格)", output)))
 
-    tpl = Path(args.templates_dir) if args.templates_dir else SKILL_SCRIPTS
+
+def selfcheck_new_data_contracts(proj: Path, qc_src: Path) -> bool:
+    """负向验证本次新增门控：旧版错误标的 + 静态估值边界必须被拦截。"""
+    import importlib.util
+
+    ops_path = proj / "input" / "运营补充数据.json"
+    original = ops_path.read_text(encoding="utf-8")
+    try:
+        ops = json.loads(original)
+        for row in ops.get("peers", []):
+            row.pop("标的", None)
+            row.pop("target", None)
+        # 模拟旧版：把任意同行误标为高亮，并把全历史边界复制到每个时点。
+        if ops.get("peers"):
+            ops["peers"][1]["高亮"] = True
+        pe = ops.get("pe_band", {})
+        if pe.get("pe_high") and pe.get("pe_low"):
+            pe["pe_high"] = [max(pe["pe_high"])] * len(pe["pe_high"])
+            pe["pe_low"] = [min(pe["pe_low"])] * len(pe["pe_low"])
+        pb = ops.get("pb_band", {})
+        if pb.get("pb_high") and pb.get("pb_low"):
+            pb["pb_high"] = [max(pb["pb_high"])] * len(pb["pb_high"])
+            pb["pb_low"] = [min(pb["pb_low"])] * len(pb["pb_low"])
+        ops_path.write_text(json.dumps(ops, ensure_ascii=False), encoding="utf-8")
+        spec = importlib.util.spec_from_file_location("_negative_qc", qc_src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _, peer_fail = mod.check_ops_contract(proj)
+        _, band_fail = mod.check_valuation_band_contract(proj)
+        return bool(peer_fail) and bool(band_fail)
+    finally:
+        ops_path.write_text(original, encoding="utf-8")
+
+
+def _run_project(args, proj: Path, scratch: Path, tpl: Path) -> int:
+    """Child owns computation; the supervising parent owns every temporary path."""
     ac_src, qc_src = tpl / "analyze_charts.py", tpl / "chart_qc.py"
-    if not ac_src.exists() or not qc_src.exists():
-        print(f"❌ 模板缺失: {ac_src} / {qc_src}")
+    rt_src = tpl / "report_template_qc.py"
+    if not ac_src.exists() or not qc_src.exists() or not rt_src.exists():
+        print(f"❌ 模板缺失: {ac_src} / {qc_src} / {rt_src}")
         return 2
 
     if args.selfcheck:
-        tmp_tpl = Path(tempfile.mkdtemp(prefix="tpl_neg_"))
+        tmp_tpl = scratch / "negative_templates"
+        tmp_tpl.mkdir()
         shutil.copy2(ac_src, tmp_tpl / "analyze_charts.py")
         shutil.copy2(qc_src, tmp_tpl / "chart_qc.py")
         broken = (tmp_tpl / "analyze_charts.py").read_text(encoding="utf-8")
         # 注入旧 bug：fig_profitability 净利率标注从"标记点下方"改回"上方"（2022 毛利率 15.3 vs
         # 净利率 14.5 同 x 标注重叠 → G8-RENDER 必 FAIL；小商品城批次实测复现）
-        bug_old = "        ax1.text(i, v - 1.1, f\"{v:.1f}%\", ha=\"center\", fontsize=8.5, color=\"#55A868\")"
-        bug_new = "        ax1.text(i, v + 0.4, f\"{v:.1f}%\", ha=\"center\", fontsize=8.5, color=\"#55A868\")"
+        bug_old = "        ax1.text(i, v - 1.1, f\"{format_number(v)}%\", ha=\"center\", fontsize=8.5, color=\"#55A868\")"
+        bug_new = "        ax1.text(i, v + 0.4, f\"{format_number(v)}%\", ha=\"center\", fontsize=8.5, color=\"#55A868\")"
         if bug_old not in broken:
             print("❌ 负向自检：模板已不包含可注入的旧 bug 锚点（fig_profitability 净利率标注下移），请更新 selfcheck 注入逻辑")
-            shutil.rmtree(tmp_tpl, ignore_errors=True)
             return 2
-        (tmp_tpl / "analyze_charts.py").write_text(broken.replace(bug_old, bug_new, 1), encoding="utf-8")
+        broken=broken.replace(bug_old, bug_new, 1).replace('    _resolve_value_collisions(fig)\n','    # disabled in negative regression\n')
+        (tmp_tpl / "analyze_charts.py").write_text(broken, encoding="utf-8")
         tpl = tmp_tpl
         ac_src, qc_src = tpl / "analyze_charts.py", tpl / "chart_qc.py"  # 让后续复制用注入后的模板
         print("[selfcheck] 已注入旧 bug（fig_profitability 净利率标注上移），预期 chart_qc FAIL")
     else:
         tmp_tpl = None
 
-    out = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="tpl_reg_"))
-    proj = out
-    print(f"[1/5] 合成项目: {proj}")
+    print(f"[1/6] 合成项目: {proj}")
     write_proj_data(proj)
     write_ops(proj)
+    # Latest-period contracts are mandatory even in synthetic regression batches.
+    op_path = proj / "input" / "运营补充数据.json"
+    op = json.loads(op_path.read_text(encoding="utf-8"))
+    review = {"checked_through": "2025-12-31", "period_end": "2025-12-31", "basis": "FY", "source": "合成回归数据"}
+    op["segment"]["period_review"] = dict(review)
+    op["peers_period"] = {"period_review": dict(review)}
+    for peer in op["peers"]:
+        peer["报告期"] = "2025-12-31"
+    op["dps"]["period_review"] = {**review, "current_fiscal_year_status": "合成样本已披露"}
+    op_path.write_text(json.dumps(op, ensure_ascii=False, indent=2), encoding="utf-8")
+    if args.selfcheck:
+        contract_ok = selfcheck_new_data_contracts(proj, qc_src)
+        print("[selfcheck] 新增 G8 数据契约:",
+              "✅ 错误标的/静态估值带均被拦截" if contract_ok else "❌ 新增契约未拦截旧版数据")
+        if not contract_ok:
+            return 1
     (proj / "input" / "图表豁免.json").write_text(
         json.dumps({"豁免": []}, ensure_ascii=False), encoding="utf-8")
     # 平台型触发：合成项目 6 分部 → SOTP 强制，验证 图18 生成与门控
@@ -403,33 +524,37 @@ def main() -> int:
     proj_scripts.mkdir(parents=True, exist_ok=True)
     shutil.copy2(ac_src, proj_scripts / "analyze_charts.py")
     shutil.copy2(qc_src, proj_scripts / "chart_qc.py")
+    shutil.copy2(rt_src, proj_scripts / "report_template_qc.py")
+    for dependency in ("chart_periods.py", "chart_period_qc.py", "financial_history_charts.py", "chart_numbers.py", "run_support.py"):
+        shutil.copy2(SKILL_SCRIPTS / dependency, proj_scripts / dependency)
 
-    print("[2/5] 出图（analyze_charts.py）...")
+    print("[2/6] 出图（analyze_charts.py）...")
     r1 = run([sys.executable, proj_scripts / "analyze_charts.py", "--dir", proj,
-              "--code", CODE, "--name", NAME, "--ops", proj / "input" / "运营补充数据.json"])
+              "--code", CODE, "--name", NAME, "--ops", proj / "input" / "运营补充数据.json"],
+             timeout=args.stage_timeout, heartbeat=args.heartbeat, label="出图")
     pngs = list((proj / "reports" / "图表").glob("图*.png"))
     print(f"      生成 PNG {len(pngs)} 张")
     if r1.returncode != 0 or len(pngs) < 15:
         print(f"❌ 出图失败（rc={r1.returncode}，PNG={len(pngs)}）")
-        if not args.keep:
-            shutil.rmtree(out, ignore_errors=True)
-        if tmp_tpl:
-            shutil.rmtree(tmp_tpl, ignore_errors=True)
         return 2
 
-    print("[3/5] 生成报告 MD + HTML（嵌入全部图表）...")
+    print("[3/6] 生成报告 MD + HTML（嵌入全部图表）...")
     md = build_report(proj)
     render_html(md)
 
-    print("[4/5] 运行 chart_qc.py（G8/G8-RENDER/G8-SENS/G8-INDUSTRY）...")
-    r2 = subprocess.run(
+    print("[4/6] 运行 report_template_qc.py（统一十部分报告契约）...")
+    r_template = run(
+        [sys.executable, proj_scripts / "report_template_qc.py", "--report", md],
+        timeout=args.stage_timeout, heartbeat=args.heartbeat, label="报告模板门")
+    if r_template.returncode != 0:
+        print("❌ 报告模板门失败")
+        return 1
+
+    print("[5/6] 运行 chart_qc.py（G8/G8-RENDER/G8-SENS/G8-INDUSTRY）...")
+    r2 = run(
         [sys.executable, proj_scripts / "chart_qc.py", "--dir", proj,
          "--report", f"reports/{NAME}_{CODE}_分析报告.md"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if r2.stdout:
-        print(r2.stdout, end="" if r2.stdout.endswith("\n") else "\n")
-    if r2.stderr:
-        print(r2.stderr, end="" if r2.stderr.endswith("\n") else "\n")
+        timeout=args.stage_timeout, heartbeat=args.heartbeat, label="图表门")
     out_text = (r2.stdout or "") + (r2.stderr or "")
     passed = "✅ 通过" in out_text and "❌ 未通过" not in out_text
     n_fail = out_text.count("[FAIL]")
@@ -437,21 +562,81 @@ def main() -> int:
 
     if args.selfcheck:
         # 负向自检：注入 bug 后必须 FAIL
-        ok = r2.returncode != 0 or (not passed and n_fail > 0)
+        ok = injected_layout_bug_detected(r2.returncode, out_text)
         print("[selfcheck] 结果:", "✅ 负向自检通过（旧 bug 被 chart_qc 抓住）" if ok else "❌ 负向自检失败（注入 bug 未被检出）")
         code = 0 if ok else 1
     else:
-        print(f"[5/5] 结论: {'✅ 模板回归通过（无 FAIL）' if passed else '❌ 模板回归失败'}"
+        print(f"[6/6] 结论: {'✅ 模板回归通过（无 FAIL）' if passed else '❌ 模板回归失败'}"
               f" ｜ FAIL={n_fail} WARN={n_warn} rc={r2.returncode}")
         code = 0 if passed else 1
 
-    if args.keep:
-        print(f"保留项目目录: {proj}")
-    elif not args.selfcheck:
-        shutil.rmtree(out, ignore_errors=True)
-    if tmp_tpl:
-        shutil.rmtree(tmp_tpl, ignore_errors=True)
     return code
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="模板回归测试：合成项目 -> 出图 -> 报告 -> chart_qc")
+    ap.add_argument("--out", default=None, help="新建项目输出目录（默认系统临时目录；仅 --keep 保留）")
+    ap.add_argument("--templates-dir", default=None, help="analyze_charts/chart_qc 所在目录（默认本脚本同目录）")
+    ap.add_argument("--keep", action="store_true", help="保留临时项目，包括失败或超时的部分输出")
+    ap.add_argument("--selfcheck", action="store_true", help="负向自检：注入旧 bug，断言 chart_qc FAIL")
+    ap.add_argument("--stage-timeout", type=float, default=300, help="单阶段超时秒数（默认 300）")
+    ap.add_argument("--total-timeout", type=float, default=1200, help="整体超时秒数（默认 1200）")
+    ap.add_argument("--heartbeat", type=float, default=10, help="运行状态间隔秒数（默认 10）")
+    ap.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--_scratch", help=argparse.SUPPRESS)
+    args = ap.parse_args(argv)
+    for key in ("stage_timeout", "total_timeout", "heartbeat"):
+        value = getattr(args, key)
+        if not math.isfinite(value) or value <= 0:
+            ap.error(f"--{key.replace('_', '-')} must be finite and positive")
+    tpl = Path(args.templates_dir).resolve() if args.templates_dir else SKILL_SCRIPTS
+    try:
+        if args._worker:
+            if not args.out or not args._scratch:
+                ap.error("internal worker requires --out and --_scratch")
+            return _run_project(args, Path(args.out).resolve(), Path(args._scratch).resolve(), tpl)
+
+        # Refuse pre-existing user directories before allocating or deleting anything.
+        explicit = Path(args.out).resolve() if args.out else None
+        if explicit is not None and explicit.exists():
+            raise ValueError("--out must name a new directory; existing contents are preserved")
+        for filename in ("analyze_charts.py", "chart_qc.py", "report_template_qc.py"):
+            if not (tpl / filename).is_file():
+                raise ValueError(f"模板缺失: {tpl / filename}")
+        with tempfile.TemporaryDirectory(prefix="tpl_reg_runtime_") as temporary:
+            scratch = Path(temporary).resolve()
+            if explicit is not None:
+                project = explicit
+                project.mkdir(parents=True)
+            elif args.keep:
+                project = Path(tempfile.mkdtemp(prefix="tpl_reg_")).resolve()
+            else:
+                project = scratch / "project"
+                project.mkdir()
+            try:
+                command = [sys.executable, str(Path(__file__).resolve()), "--_worker",
+                           "--out", str(project), "--_scratch", str(scratch),
+                           "--templates-dir", str(tpl), "--stage-timeout", str(float(args.stage_timeout)),
+                           "--heartbeat", str(float(args.heartbeat))]
+                if args.selfcheck:
+                    command.append("--selfcheck")
+                result = run_process(command, timeout=args.total_timeout, heartbeat=args.heartbeat,
+                                     label="模板回归整体")
+                if result["status"] == "TIMEOUT":
+                    return 2
+                code = result.get("exit_code")
+                return code if code in (0, 1, 2) else 2
+            finally:
+                if args.keep:
+                    print(f"保留项目目录: {project}", flush=True)
+                elif explicit is not None:
+                    # This exact absolute path was created above and did not exist before.
+                    if project.resolve() != explicit or project == Path(project.anchor):
+                        raise ValueError("Refusing cleanup outside the owned output path")
+                    shutil.rmtree(project)
+    except (OSError, ValueError, TimeoutError) as exc:
+        print(f"❌ 模板回归运行错误: {exc}", flush=True)
+        return 2
 
 
 if __name__ == "__main__":

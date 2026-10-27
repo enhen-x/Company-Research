@@ -9,16 +9,34 @@ Usage:
 """
 
 import argparse
+import json
 import math
 import os
 import statistics
 import sys
 from datetime import datetime
+from pathlib import Path
+
+# Bound optional provider collection, including dependency import, as one process tree.
+if __name__ == "__main__" and "--_valuation-worker" not in sys.argv:
+    from run_support import run_process
+    guard = argparse.ArgumentParser(add_help=False)
+    guard.add_argument("--total-timeout", type=float, default=180)
+    options, _ = guard.parse_known_args()
+    try:
+        outcome = run_process([sys.executable, "-u", str(Path(__file__).resolve()),
+                               *sys.argv[1:], "--_valuation-worker"],
+                              timeout=options.total_timeout, heartbeat=15, label="独立估值")
+    except ValueError as exc:
+        guard.error(str(exc))
+    raise SystemExit(124 if outcome["status"] == "TIMEOUT" else outcome.get("exit_code") or (0 if outcome["status"] == "PASS" else 1))
 
 import pandas as pd
 
 from config import get_token, validate_stock_code
 from format_utils import format_number, format_table, format_header
+from valuation_math import (cagr, enterprise_dcf, implied_perpetual_growth, perpetuity_value,
+                            implied_stable_growth, stable_cashflow_path)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -46,8 +64,8 @@ MARKET_PARAMS = {
 
 # Beta by market cap (百万元)
 BETA_BY_CAP = [
-    (1_000_000, 0.8),   # > 1000亿 (> 1,000,000 百万元)
-    (100_000, 1.0),     # 100-1000亿
+    (100_000, 0.8),     # > 1000亿 (> 100,000 百万元)
+    (10_000, 1.0),      # 100-1000亿
     (0, 1.2),           # < 100亿
 ]
 
@@ -77,6 +95,7 @@ class ValuationEngine:
 
         self.params = MARKET_PARAMS[self.market]
         self._sf = client._safe_float  # shorthand
+        self.method_status = {}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -117,9 +136,12 @@ class ValuationEngine:
             total_shares = total_share_wan * 10000 if total_share_wan else None
             close = close
 
+        pe = self._sf(row.get("pe_ttm"))
+        if pe is None:
+            pe = self._sf(row.get("pe"))
         return {
             "close": close,
-            "pe_ttm": self._sf(row.get("pe_ttm") or row.get("pe")),
+            "pe_ttm": pe,
             "pb": self._sf(row.get("pb")),
             "mkt_cap_mm": mkt_cap_mm,
             "total_shares": total_shares,
@@ -128,23 +150,122 @@ class ValuationEngine:
 
     @staticmethod
     def _cagr(vals: list[float | None]) -> float | None:
-        """Compute CAGR from a desc-ordered list [latest, ..., oldest]."""
-        clean = [v for v in vals if v is not None and v > 0]
-        if len(clean) < 2:
-            return None
-        latest, oldest = clean[0], clean[-1]
-        n = len(clean) - 1
-        if oldest <= 0:
-            return None
-        return (latest / oldest) ** (1 / n) - 1
+        """Compute CAGR from values or ``(period, value)`` pairs."""
+        return cagr(vals)
 
     def _interest_bearing_debt(self, row) -> float:
-        total = 0.0
+        values = []
         for c in ("st_borr", "lt_borr", "bond_payable", "non_cur_liab_due_1y"):
             v = self._sf(row.get(c))
             if v is not None:
-                total += v
-        return total
+                values.append(v)
+        return sum(values) if len(values) == 4 else None
+
+    def _unavailable(self, method: str, reason: str):
+        self.method_status[method] = {"status": "INSUFFICIENT_DATA", "reason": reason}
+        return None
+
+    def _valuation_contract(self) -> dict:
+        """Optional explicit cash-flow/valuation bridge contract, no defaults."""
+        value = self.client._store.get("valuation_contract")
+        return value if isinstance(value, dict) else {}
+
+    def _dcf_context(self, wacc_data: dict, method: str) -> dict | None:
+        contract = self._valuation_contract()
+        basis = contract.get("cashflow_basis")
+        if basis not in ("FCFF", "FCFE"):
+            return self._unavailable(method, "cashflow_basis must explicitly be FCFF or FCFE")
+        if contract.get("currency") != {"A": "CNY", "HK": "HKD", "US": "USD"}[self.market]:
+            return self._unavailable(method, "cash-flow currency must match the market price currency; convert with evidence first")
+        unit = contract.get("amount_unit")
+        if unit not in ("raw", "million"):
+            return self._unavailable(method, "amount_unit must explicitly be raw or million")
+        scale = 1e6 if unit == "million" else 1.0
+        bi = self._basic_info()
+        shares = bi.get("total_shares")
+        if shares is None or shares <= 0:
+            return self._unavailable(method, "positive total shares are required")
+        rate_key = "wacc" if basis == "FCFF" else "ke"
+        rate = self._sf(wacc_data.get(rate_key))
+        explicit_rates = contract.get("discount_rates", {})
+        if isinstance(explicit_rates, dict) and explicit_rates.get("evidence_id"):
+            explicit_rate = self._sf(explicit_rates.get(rate_key + "_pct"))
+            if explicit_rate is not None:
+                rate = explicit_rate
+        if rate is None or rate <= 0:
+            return self._unavailable(method, f"a positive {rate_key} is required")
+        cash = debt = other = 0.0
+        if basis == "FCFF":
+            bridge = contract.get("equity_bridge", {})
+            if not isinstance(bridge, dict) or not bridge.get("evidence_id"):
+                return self._unavailable(method, "FCFF requires an evidenced equity_bridge")
+            values = [self._sf(bridge.get(key)) for key in ("cash", "debt", "other_equity_adjustment")]
+            if any(value is None for value in values):
+                return self._unavailable(method, "equity_bridge must specify cash, debt and other_equity_adjustment, including explicit zeros")
+            cash, debt, other = [value * scale for value in values]
+        elif contract.get("cashflow_scope") != "parent_common":
+            return self._unavailable(method, "FCFE must explicitly be attributable to parent common equity")
+        return {"contract": contract, "basis": basis, "rate": rate, "rate_basis": rate_key.upper(),
+                "scale": scale, "shares": shares, "cash": cash, "debt": debt, "other": other}
+
+    def _contract_cashflows(self, context: dict, method: str) -> list[tuple[str, float]] | None:
+        """Read explicit cash flows, provider FCFF/FCFE, or evidenced CFO conversion."""
+        contract, scale = context["contract"], context["scale"]
+        source = contract.get("historical_source")
+        if source == "explicit":
+            values = []
+            for row in contract.get("historical_cashflows", []):
+                value = self._sf(row.get("value"))
+                period = str(row.get("period", ""))
+                if value is None or not period or not row.get("evidence_id"):
+                    return self._unavailable(method, "every historical cash flow requires period, finite value and evidence_id")
+                values.append((period, value * scale))
+            if len({period for period, _ in values}) != len(values):
+                raise ValueError("historical cash-flow periods must be unique")
+            return sorted(values, key=lambda row: row[0], reverse=True)
+        if source == "provider":
+            field = context["basis"].lower()
+            rows = self._annual_df("fina_indicators")
+            return [(str(row.get("end_date", ""))[:8], value)
+                    for _, row in rows.iterrows()
+                    if (value := self._sf(row.get(field))) is not None]
+        if source != "ocf":
+            return self._unavailable(method, "historical_source must explicitly be explicit, provider or ocf")
+        classification = contract.get("ocf_interest_classification")
+        if classification not in ("within_operating", "outside_operating"):
+            return self._unavailable(method, "CFO interest classification is required; market labels do not prove it")
+        adjustments = contract.get("ocf_adjustments", {})
+        records = []
+        for _, row in self._annual_df("cashflow").head(5).iterrows():
+            period = str(row.get("end_date", ""))[:8]
+            ocf = self._sf(row.get("n_cashflow_act"))
+            capex = self._sf(row.get("c_pay_acq_const_fiolta"))
+            if ocf is None or capex is None:
+                continue
+            adjustment = adjustments.get(period, {})
+            flow = ocf - abs(capex)
+            needs_interest = ((context["basis"] == "FCFF" and classification == "within_operating")
+                              or (context["basis"] == "FCFE" and classification == "outside_operating"))
+            if needs_interest:
+                interest = self._sf(adjustment.get("after_tax_interest"))
+                if interest is None or not adjustment.get("evidence_id"):
+                    return self._unavailable(method, f"{period}: evidenced after_tax_interest is required")
+                flow += interest * scale * (1 if context["basis"] == "FCFF" else -1)
+            if context["basis"] == "FCFE":
+                borrowing = self._sf(adjustment.get("net_borrowing"))
+                if borrowing is None or not adjustment.get("evidence_id"):
+                    return self._unavailable(method, f"{period}: evidenced net_borrowing is required for FCFE")
+                flow += borrowing * scale
+            records.append((period, flow))
+        return records
+
+    @staticmethod
+    def _cashflow_value(projected: list[float], context: dict, terminal_growth: float) -> dict:
+        result = enterprise_dcf(projected, context["rate"] / 100, terminal_growth / 100)
+        value = result["ev"]
+        equity = (value + context["cash"] - context["debt"] + context["other"]
+                  if context["basis"] == "FCFF" else value)
+        return {**result, "equity_value": equity, "intrinsic": equity / context["shares"]}
 
     # ------------------------------------------------------------------
     # 1. Classification
@@ -181,12 +302,14 @@ class ValuationEngine:
         payout_avg = statistics.mean(payout_vals) if payout_vals else None
 
         # Revenue CAGR 5yr
-        rev_series = [self._sf(r.get("revenue")) for _, r in income_df.head(5).iterrows()]
+        rev_series = [(str(r.get("end_date", ""))[:8], self._sf(r.get("revenue")))
+                      for _, r in income_df.head(5).iterrows()]
         rev_cagr = self._cagr(rev_series)
         rev_cagr_pct = rev_cagr * 100 if rev_cagr is not None else None
 
         # Net profit CAGR 5yr
-        np_series = [self._sf(r.get("n_income_attr_p")) for _, r in income_df.head(5).iterrows()]
+        np_series = [(str(r.get("end_date", ""))[:8], self._sf(r.get("n_income_attr_p")))
+                     for _, r in income_df.head(5).iterrows()]
         np_cagr = self._cagr(np_series)
         np_cagr_pct = np_cagr * 100 if np_cagr is not None else None
 
@@ -248,6 +371,9 @@ class ValuationEngine:
         """Compute WACC and return all intermediate values."""
         bi = self._basic_info()
         mkt_cap_mm = bi.get("mkt_cap_mm") or 0
+        estimation_date = datetime.now().strftime("%Y-%m-%d")
+        sources = {"erp": f"market-default assumption ({estimation_date})",
+                   "beta": "market-cap proxy; not a statistically estimated beta"}
 
         # Rf
         rf_df = self.client._store.get("risk_free_rate")
@@ -256,11 +382,14 @@ class ValuationEngine:
             rf = self._sf(rf_df.iloc[0].get("yield"))
         if rf is None:
             rf = self.params["rf_default"]
+            sources["rf"] = f"market-default assumption ({estimation_date})"
+        else:
+            sources["rf"] = "risk_free_rate provider observation; verify quote date"
 
         # Beta by market cap
         beta = 1.0
         for threshold, b in BETA_BY_CAP:
-            if mkt_cap_mm > threshold:
+            if mkt_cap_mm > threshold or (threshold == 10_000 and mkt_cap_mm == threshold):
                 beta = b
                 break
 
@@ -272,24 +401,30 @@ class ValuationEngine:
         bs_df = self._annual_df("balance_sheet")
         finance_exp = None
         if not income_df.empty:
-            finance_exp = self._sf(income_df.iloc[0].get("finance_exp"))
+            finance_exp = self._sf(income_df.iloc[0].get("int_exp"))
+            if finance_exp is None:
+                finance_exp = self._sf(income_df.iloc[0].get("interest_expense"))
 
-        debt_latest = 0.0
-        debt_prev = 0.0
+        debt_latest = None
+        debt_prev = None
         if not bs_df.empty:
             debt_latest = self._interest_bearing_debt(bs_df.iloc[0])
             if len(bs_df) > 1:
                 debt_prev = self._interest_bearing_debt(bs_df.iloc[1])
-        avg_debt = (debt_latest + debt_prev) / 2 if (debt_latest + debt_prev) > 0 else 0
+        avg_debt = ((debt_latest + debt_prev) / 2
+                    if debt_latest is not None and debt_prev is not None
+                    and (debt_latest + debt_prev) > 0 else 0)
 
         if finance_exp and finance_exp > 0 and avg_debt > 0:
             kd_pre = finance_exp / avg_debt * 100
+            sources["kd_pre"] = "reported interest expense / average interest-bearing debt; verify coverage"
         else:
             kd_pre = rf + 1.0
+            sources["kd_pre"] = f"Rf+1 percentage point assumption ({estimation_date}); no financing-cost observation"
 
         # Capital structure (market cap in raw units to match debt)
         # debt is in raw yuan (from _store), mkt_cap_mm is in millions
-        debt_mm = debt_latest / 1e6 if self.market == "A" else debt_latest / 1e6
+        debt_mm = debt_latest / 1e6 if debt_latest is not None else None
         # For A-share: _store amounts are in raw yuan, mkt_cap_mm is 万元/100
         # Actually _store amounts depend on how they're stored.
         # The balance sheet from tushare returns values in yuan for A-shares.
@@ -297,17 +432,17 @@ class ValuationEngine:
         # So debt needs to be converted to 百万元 too.
         if self.market == "A":
             e_val = mkt_cap_mm  # 百万元
-            d_val = debt_latest / 1e6  # raw yuan → 百万元
+            d_val = debt_latest / 1e6 if debt_latest is not None else None  # raw yuan → 百万元
         elif self.market == "HK":
             e_val = mkt_cap_mm  # 百万港元
-            d_val = debt_latest / 1e6  # raw HKD → 百万港元
+            d_val = debt_latest / 1e6 if debt_latest is not None else None  # raw HKD → 百万港元
         else:
             e_val = mkt_cap_mm  # 百万美元
-            d_val = debt_latest / 1e6  # raw USD → 百万美元
+            d_val = debt_latest / 1e6 if debt_latest is not None else None  # raw USD → 百万美元
 
-        total = e_val + d_val
-        e_weight = e_val / total * 100 if total > 0 else 100
-        d_weight = d_val / total * 100 if total > 0 else 0
+        total = e_val + d_val if d_val is not None else None
+        e_weight = e_val / total * 100 if total is not None and total > 0 else None
+        d_weight = d_val / total * 100 if total is not None and total > 0 else None
 
         # Tax rate
         tax_rates = []
@@ -317,9 +452,14 @@ class ValuationEngine:
             if tax is not None and pre_tax and pre_tax > 0:
                 tax_rates.append(tax / pre_tax * 100)
         tax_rate = statistics.mean(tax_rates) if tax_rates else self.params["tax_default"]
+        sources["tax_rate"] = ("historical reported income tax / pre-tax profit"
+                               if tax_rates else f"market-default assumption ({estimation_date})")
 
         # WACC
-        if d_val <= 0:
+        if d_val is None or e_weight is None or d_weight is None:
+            wacc = None
+            sources["wacc"] = "insufficient debt coverage; not assumed to be zero"
+        elif d_val <= 0:
             wacc = ke
         else:
             wacc = ke * e_weight / 100 + kd_pre * (1 - tax_rate / 100) * d_weight / 100
@@ -332,6 +472,8 @@ class ValuationEngine:
             "mkt_cap_mm": mkt_cap_mm,
             "debt_mm": d_val,
             "e_val": e_val, "d_val": d_val,
+            "parameter_sources": sources,
+            "parameter_as_of": estimation_date,
         }
 
     # ------------------------------------------------------------------
@@ -339,116 +481,66 @@ class ValuationEngine:
     # ------------------------------------------------------------------
 
     def dcf_stable(self, wacc_data: dict) -> dict | None:
-        """DCF for stable companies (蓝筹/混合)."""
-        cf_df = self._annual_df("cashflow")
-        bi = self._basic_info()
-        bs_df = self._annual_df("balance_sheet")
-
-        if cf_df.empty or not bi.get("total_shares"):
+        """Stable DCF with an explicit FCFF/WACC or FCFE/Ke contract."""
+        method = "DCF"
+        context = self._dcf_context(wacc_data, method)
+        if context is None:
             return None
-
-        wacc = wacc_data["wacc"]
-        total_shares = bi["total_shares"]
-
-        # FCF series
-        fcf_list = []
-        for _, r in cf_df.head(5).iterrows():
-            ocf = self._sf(r.get("n_cashflow_act"))
-            capex = self._sf(r.get("c_pay_acq_const_fiolta"))
-            if ocf is not None and capex is not None:
-                fcf_list.append(ocf - abs(capex))
-
-        if len(fcf_list) < 2:
+        records = self._contract_cashflows(context, method)
+        if records is None:
             return None
-
-        # FCF base (3yr avg, excluding outlier if any)
-        base_pool = fcf_list[:3] if len(fcf_list) >= 3 else fcf_list
-        fcf_base = statistics.mean(base_pool)
-        all_negative = all(f <= 0 for f in fcf_list)
-
-        # Growth assumptions
-        fcf_cagr = self._cagr(fcf_list)
-        if fcf_cagr is not None and fcf_cagr > 0:
-            g_hist = fcf_cagr * 100
-        else:
-            # Fallback to revenue CAGR
-            rev_series = [self._sf(r.get("revenue")) for _, r in self._annual_df("income").head(5).iterrows()]
-            rev_cagr = self._cagr(rev_series)
-            g_hist = rev_cagr * 100 if rev_cagr is not None else 5.0
-
-        g_conservative = g_hist * 0.8
-        g_terminal = self.params["g_terminal"]
-
-        # Ensure g_terminal < WACC
-        if g_terminal >= wacc:
-            g_terminal = wacc - 2.0
-
-        g_fade = (g_conservative + g_terminal) / 2
-        g_fade2 = (g_fade + g_terminal) / 2
-
-        # Project FCF
-        growth_rates = [g_conservative, g_conservative, g_fade, g_fade2, g_terminal]
-        projected = []
-        prev = fcf_base
-        for g in growth_rates:
-            prev = prev * (1 + g / 100)
-            projected.append(prev)
-
-        # Terminal value
-        tv = projected[-1] * (1 + g_terminal / 100) / (wacc / 100 - g_terminal / 100)
-
-        # Present values
-        pv_fcf = sum(f / (1 + wacc / 100) ** (i + 1) for i, f in enumerate(projected))
-        pv_tv = tv / (1 + wacc / 100) ** 5
-        ev = pv_fcf + pv_tv
-        tv_pct = pv_tv / ev * 100 if ev > 0 else 0
-
-        # Cash and debt
-        cash = self._sf(bs_df.iloc[0].get("money_cap")) if not bs_df.empty else 0
-        cash = cash or 0
-        debt_raw = self._interest_bearing_debt(bs_df.iloc[0]) if not bs_df.empty else 0
-
-        equity_value = ev + cash - debt_raw
-        intrinsic = equity_value / total_shares if total_shares > 0 else 0
-
-        # Sensitivity matrix 5x5
-        wacc_range = [wacc - 2, wacc - 1, wacc, wacc + 1, wacc + 2]
-        g_range = [g_terminal - 1, g_terminal - 0.5, g_terminal, g_terminal + 0.5, g_terminal + 1]
+        records = records[:5]
+        if len(records) < 2:
+            return self._unavailable(method, "at least two comparable annual cash-flow observations are required")
+        fcf_list = [value for _, value in records]
+        fcf_base = statistics.mean(fcf_list[:3])
+        growth = self._sf(context["contract"].get("stable_growth_pct"))
+        growth_source = "explicit assumption"
+        if growth is None:
+            historical_growth = self._cagr(records)
+            if historical_growth is None:
+                return self._unavailable(method, "cash-flow CAGR is undefined; provide a supported stable_growth_pct assumption")
+            growth = historical_growth * 100 * 0.8
+            growth_source = "80% of historical cash-flow CAGR (heuristic assumption)"
+        terminal = self._sf(context["contract"].get("terminal_growth_pct"))
+        terminal_source = "explicit assumption"
+        if terminal is None:
+            terminal = self.params["g_terminal"]
+            terminal_source = "market default assumption"
+        rate = context["rate"]
+        if rate <= terminal:
+            raise ValueError(f"{context['rate_basis']} ({rate}) must be greater than terminal growth ({terminal})")
+        fade = (growth + terminal) / 2
+        rates = [growth, growth, fade, (fade + terminal) / 2, terminal]
+        if fcf_base <= 0:
+            return self._unavailable(method, "a non-positive terminal cash flow cannot support a Gordon terminal")
+        projected = stable_cashflow_path(fcf_base, growth / 100, terminal / 100)
+        value = self._cashflow_value(projected, context, terminal)
+        rate_range = [rate - 2, rate - 1, rate, rate + 1, rate + 2]
+        growth_range = [terminal - 1, terminal - 0.5, terminal, terminal + 0.5, terminal + 1]
         sensitivity = []
-        for w in wacc_range:
+        for discount in rate_range:
             row = []
-            for g in g_range:
-                if g >= w:
+            for growth_s in growth_range:
+                try:
+                    row.append(self._cashflow_value(projected, {**context, "rate": discount}, growth_s)["intrinsic"])
+                except ValueError:
                     row.append(None)
-                    continue
-                # Simplified: re-project with same cash flows but different TV
-                tv_s = projected[-1] * (1 + g / 100) / (w / 100 - g / 100)
-                pv_fcf_s = sum(f / (1 + w / 100) ** (i + 1) for i, f in enumerate(projected))
-                pv_tv_s = tv_s / (1 + w / 100) ** 5
-                ev_s = pv_fcf_s + pv_tv_s
-                eq_s = ev_s + cash - debt_raw
-                row.append(eq_s / total_shares if total_shares > 0 else 0)
             sensitivity.append(row)
-
+        self.method_status[method] = {"status": "COMPUTED", "basis": context["basis"]}
         return {
-            "method": "DCF",
-            "intrinsic": intrinsic,
-            "fcf_base": fcf_base,
-            "g_conservative": g_conservative,
-            "g_terminal": g_terminal,
-            "tv_pct": tv_pct,
-            "all_negative": all_negative,
-            "projected_fcf": projected,
-            "growth_rates": growth_rates,
-            "pv_fcf": pv_fcf,
-            "pv_tv": pv_tv,
-            "ev": ev,
-            "cash": cash,
-            "debt_raw": debt_raw,
-            "equity_value": equity_value,
-            "sensitivity": sensitivity,
-            "wacc_range": wacc_range,
-            "g_range": g_range,
+            "method": method, "intrinsic": value["intrinsic"],
+            "cashflow_basis": context["basis"], "discount_rate_basis": context["rate_basis"],
+            "value_bridge": ("EV + cash - debt + other equity adjustment" if context["basis"] == "FCFF"
+                             else "discounted FCFE = parent common equity; no cash/debt bridge"),
+            "fcf_base": fcf_base, "g_conservative": growth, "g_terminal": terminal,
+            "growth_source": growth_source, "terminal_growth_source": terminal_source,
+            "tv_pct": value["terminal_share"] * 100, "all_negative": all(v <= 0 for v in fcf_list),
+            "projected_fcf": projected, "growth_rates": rates, "pv_fcf": value["pv_fcf"],
+            "pv_tv": value["pv_terminal"], "ev": value["ev"] if context["basis"] == "FCFF" else None,
+            "cash": context["cash"], "debt_raw": context["debt"], "other_equity_adjustment": context["other"],
+            "equity_value": value["equity_value"], "sensitivity": sensitivity,
+            "wacc_range": rate_range, "g_range": growth_range,
         }
 
     # ------------------------------------------------------------------
@@ -456,103 +548,71 @@ class ValuationEngine:
     # ------------------------------------------------------------------
 
     def dcf_scenarios(self, wacc_data: dict) -> dict | None:
-        """DCF with 3 scenarios for growth companies."""
-        cf_df = self._annual_df("cashflow")
-        income_df = self._annual_df("income")
-        bi = self._basic_info()
-        bs_df = self._annual_df("balance_sheet")
-
-        if cf_df.empty or income_df.empty or not bi.get("total_shares"):
+        """Discount evidenced scenario paths; never invent an NI-to-FCF bridge."""
+        method = "DCF_Scenarios"
+        context = self._dcf_context(wacc_data, method)
+        if context is None:
             return None
-
-        wacc = wacc_data["wacc"]
-        total_shares = bi["total_shares"]
-        g_terminal = self.params["g_terminal"]
-        if g_terminal >= wacc:
-            g_terminal = wacc - 2.0
-
-        # Historical metrics
-        rev_series = [self._sf(r.get("revenue")) for _, r in income_df.head(5).iterrows()]
-        rev_cagr = self._cagr(rev_series)
-        rev_cagr_pct = rev_cagr * 100 if rev_cagr is not None else 10.0
-
-        # Latest financials
-        latest_inc = income_df.iloc[0]
-        latest_cf = cf_df.iloc[0]
-        revenue = self._sf(latest_inc.get("revenue")) or 0
-        np_val = self._sf(latest_inc.get("n_income_attr_p")) or 0
-        net_margin = np_val / revenue * 100 if revenue > 0 else 5.0
-
-        ocf = self._sf(latest_cf.get("n_cashflow_act")) or 0
-        capex = abs(self._sf(latest_cf.get("c_pay_acq_const_fiolta")) or 0)
-        capex_rev = capex / revenue if revenue > 0 else 0.05
-
-        da_components = [
-            self._sf(latest_cf.get("depr_fa_coga_dpba")) or 0,
-            self._sf(latest_cf.get("amort_intang_assets")) or 0,
-            self._sf(latest_cf.get("lt_amort_deferred_exp")) or 0,
-        ]
-        da = sum(da_components)
-
-        cash = self._sf(bs_df.iloc[0].get("money_cap")) if not bs_df.empty else 0
-        cash = cash or 0
-        debt_raw = self._interest_bearing_debt(bs_df.iloc[0]) if not bs_df.empty else 0
-
-        def _project_scenario(rev_g_factors, margin_adj, capex_factor):
-            projected = []
-            rev = revenue
-            for i in range(5):
-                g = rev_g_factors[i] if i < len(rev_g_factors) else rev_g_factors[-1]
-                rev = rev * (1 + g / 100)
-                margin = net_margin + margin_adj * (i + 1)
-                np_s = rev * margin / 100
-                capex_s = rev * capex_rev * capex_factor
-                fcf_s = np_s + da - capex_s
-                projected.append(fcf_s)
-            return projected
-
-        # Optimistic: historical CAGR maintained, margin improves
-        opt_g = [rev_cagr_pct] * 5
-        opt_fcf = _project_scenario(opt_g, 0.5, 1.0)
-
-        # Base: CAGR × 0.7, margin flat
-        base_g = [rev_cagr_pct * 0.7] * 5
-        base_fcf = _project_scenario(base_g, 0.0, 1.0)
-
-        # Pessimistic: CAGR × 0.4 for 2yr, 0% after, margin compresses
-        pess_g = [rev_cagr_pct * 0.4, rev_cagr_pct * 0.4, 0, 0, 0]
-        pess_fcf = _project_scenario(pess_g, -0.3, 1.2)
-
-        def _dcf_value(projected_fcf):
-            if not projected_fcf or projected_fcf[-1] <= 0:
-                tv = 0
-            else:
-                tv = projected_fcf[-1] * (1 + g_terminal / 100) / (wacc / 100 - g_terminal / 100)
-            pv_fcf = sum(f / (1 + wacc / 100) ** (i + 1) for i, f in enumerate(projected_fcf))
-            pv_tv = tv / (1 + wacc / 100) ** 5
-            ev = pv_fcf + pv_tv
-            eq = ev + cash - debt_raw
-            return eq / total_shares if total_shares > 0 else 0
-
-        v_opt = _dcf_value(opt_fcf)
-        v_base = _dcf_value(base_fcf)
-        v_pess = _dcf_value(pess_fcf)
-
-        weighted = 0.25 * v_opt + 0.50 * v_base + 0.25 * v_pess
-
+        contract = context["contract"]
+        scenarios_input = contract.get("scenarios")
+        names = ("optimistic", "base", "pessimistic")
+        if not isinstance(scenarios_input, dict) or any(name not in scenarios_input for name in names):
+            return self._unavailable(method, "explicit optimistic/base/pessimistic cash-flow scenarios are required")
+        terminal = self._sf(contract.get("terminal_growth_pct"))
+        if terminal is None:
+            terminal = self.params["g_terminal"]
+        if context["rate"] <= terminal:
+            raise ValueError(f"{context['rate_basis']} must be greater than terminal growth")
+        scenarios = {}
+        probabilities = []
+        for name in names:
+            item = scenarios_input[name]
+            if not isinstance(item, dict) or not item.get("evidence_id"):
+                return self._unavailable(method, f"{name}: scenario assumptions need evidence_id")
+            probability = self._sf(item.get("probability"))
+            if probability is None or not 0 <= probability <= 1:
+                raise ValueError(f"{name}: probability must be in [0,1]")
+            raw_flows = item.get("cashflows")
+            if not isinstance(raw_flows, list) or not raw_flows:
+                return self._unavailable(method, f"{name}: explicit projected cashflows are required")
+            flows = [self._sf(value) for value in raw_flows]
+            if any(value is None for value in flows):
+                return self._unavailable(method, f"{name}: projected cash flows cannot contain missing values")
+            flows = [value * context["scale"] for value in flows]
+            if flows[-1] <= 0:
+                return self._unavailable(method, f"{name}: a non-positive terminal cash flow cannot support a Gordon terminal")
+            result = self._cashflow_value(flows, context, terminal)
+            revenue_growth = item.get("revenue_growth_pct")
+            if not isinstance(revenue_growth, list) or not revenue_growth:
+                revenue_growth = [None]
+            scenarios[name] = {"growth": revenue_growth, "fcf": flows, "value": result["intrinsic"],
+                               "probability": probability, "evidence_id": item["evidence_id"]}
+            probabilities.append(probability)
+        if not math.isclose(sum(probabilities), 1.0, abs_tol=1e-9):
+            raise ValueError("scenario probabilities must sum to 1")
+        if len({len(item["fcf"]) for item in scenarios.values()}) != 1:
+            raise ValueError("scenario forecast horizons must match")
+        weighted = sum(item["probability"] * item["value"] for item in scenarios.values())
+        income_df = self._annual_df("income")
+        rev_series = [(str(row.get("end_date", ""))[:8], self._sf(row.get("revenue")))
+                      for _, row in income_df.head(5).iterrows()]
+        historical_growth = self._cagr(rev_series)
+        net_margin = None
+        if not income_df.empty:
+            revenue = self._sf(income_df.iloc[0].get("revenue"))
+            profit = self._sf(income_df.iloc[0].get("n_income_attr_p"))
+            if revenue is not None and revenue > 0 and profit is not None:
+                net_margin = profit / revenue * 100
+        self.method_status[method] = {"status": "COMPUTED", "basis": context["basis"]}
         return {
-            "method": "DCF_Scenarios",
-            "intrinsic": weighted,
-            "v_optimistic": v_opt,
-            "v_base": v_base,
-            "v_pessimistic": v_pess,
-            "rev_cagr_pct": rev_cagr_pct,
-            "net_margin": net_margin,
-            "scenarios": {
-                "optimistic": {"growth": opt_g, "fcf": opt_fcf, "value": v_opt},
-                "base": {"growth": base_g, "fcf": base_fcf, "value": v_base},
-                "pessimistic": {"growth": pess_g, "fcf": pess_fcf, "value": v_pess},
-            },
+            "method": method, "intrinsic": weighted, "cashflow_basis": context["basis"],
+            "discount_rate_basis": context["rate_basis"],
+            "value_bridge": ("EV + cash - debt + other equity adjustment" if context["basis"] == "FCFF"
+                             else "discounted FCFE = parent common equity; no cash/debt bridge"),
+            "v_optimistic": scenarios["optimistic"]["value"], "v_base": scenarios["base"]["value"],
+            "v_pessimistic": scenarios["pessimistic"]["value"],
+            "rev_cagr_pct": historical_growth * 100 if historical_growth is not None else None,
+            "net_margin": net_margin, "scenarios": scenarios,
         }
 
     # ------------------------------------------------------------------
@@ -575,10 +635,13 @@ class ValuationEngine:
             year = str(r.get("end_date", ""))[:4]
             if not year:
                 continue
-            dps = self._sf(r.get("cash_div_tax")) or 0
+            dps = self._sf(r.get("cash_div_tax"))
+            if dps is None or dps < 0:
+                continue
             yearly[year] = yearly.get(year, 0) + dps
 
-        # Cross-validate against §5 dividends paid; fix incomplete years
+        # Cross-check only: cash payments may include interest and different
+        # ownership/timing, so they can never replace the observed DPS.
         cf_df = self._annual_df("cashflow")
         bi = self._basic_info()
         total_shares = bi.get("total_shares")
@@ -588,7 +651,13 @@ class ValuationEngine:
                 cf_row = cf_by_year.get(year)
                 if cf_row is None:
                     continue
-                div_paid = self._sf(cf_row.get("c_pay_dist_dpcp_int_exp"))
+                # The *_int_exp field mixes dividends, profits and interest;
+                # only a dividends-only field may validate a DPS series.
+                div_paid = self._sf(cf_row.get("c_pay_dist_dpcp"))
+                mixed = False
+                if div_paid is None:
+                    div_paid = self._sf(cf_row.get("c_pay_dist_dpcp_int_exp"))
+                    mixed = True
                 if not div_paid or div_paid <= 0:
                     continue
                 # Tushare reports div_paid as positive (absolute outflow)
@@ -596,18 +665,18 @@ class ValuationEngine:
                 implied = dps_total * total_shares
                 ratio = implied / div_paid if div_paid > 0 else 0
                 if 0 < ratio < 0.5:
-                    # DPS from dividend API is significantly less than CF shows
-                    # → likely incomplete (interim only). Estimate from CF instead.
+                    # Validate completeness when a separate dividends-only cash
+                    # flow field exists, but never overwrite observed DPS with
+                    # an inferred value.
                     dps_from_cf = div_paid / total_shares
-                    print(f"  [DDM fix] {year}: DPS {dps_total:.2f} → {dps_from_cf:.2f} "
-                          f"(corrected from CF dividends_paid)", file=sys.stderr)
-                    yearly[year] = dps_from_cf
+                    print(f"  [DDM warning] {year}: DPS {dps_total:.2f} vs "
+                          f"cash outflow {dps_from_cf:.2f} ({'mixed dividends/profits/interest' if mixed else 'dividends-only'}); retained DPS series", file=sys.stderr)
                 elif ratio > 2.0:
                     print(f"  [DDM warning] {year}: DPS×shares={implied/1e6:.0f}M vs "
                           f"CF={div_paid/1e6:.0f}M (ratio={ratio:.2f})", file=sys.stderr)
 
         result = sorted(yearly.items(), key=lambda x: x[0], reverse=True)
-        return [(y, v) for y, v in result if v > 0]
+        return [(y, v) for y, v in result if v >= 0]
 
     def ddm(self, ke: float) -> dict | None:
         """Dividend Discount Model (Gordon or 2-stage)."""
@@ -619,7 +688,8 @@ class ValuationEngine:
             return None
 
         dps_latest = annual_dps[0][1]
-        dps_list = [v for _, v in annual_dps]
+        if dps_latest <= 0:
+            return self._unavailable("DDM", "latest observed fiscal-year DPS is zero")
 
         # Payout ratio stats
         payout_lookup = self.client._get_payout_by_year()
@@ -628,8 +698,10 @@ class ValuationEngine:
         payout_std = statistics.stdev(payout_vals) if len(payout_vals) >= 2 else 0
 
         # DPS CAGR
-        dps_cagr = self._cagr(dps_list)
-        dps_cagr_pct = dps_cagr * 100 if dps_cagr is not None else 2.0
+        dps_cagr = self._cagr(annual_dps)
+        if dps_cagr is None:
+            return None
+        dps_cagr_pct = dps_cagr * 100
 
         # ROE for sustainable growth
         fi_df = self._annual_df("fina_indicators")
@@ -658,7 +730,9 @@ class ValuationEngine:
         else:
             # Two-stage
             g1 = dps_cagr_pct
-            g2 = min(g_terminal, ke - 1.0)  # ensure g2 < ke
+            g2 = g_terminal
+            if ke <= g2:
+                raise ValueError("Ke must be greater than terminal dividend growth")
             pv_phase1 = 0
             dps_t = dps_latest
             for t in range(1, 6):
@@ -809,17 +883,20 @@ class ValuationEngine:
             return None
 
         # Earnings growth (3yr CAGR first, fallback to 5yr)
-        np_series = [self._sf(r.get("n_income_attr_p")) for _, r in income_df.head(4).iterrows()]
+        np_series = [(str(r.get("end_date", ""))[:8], self._sf(r.get("n_income_attr_p")))
+                     for _, r in income_df.head(4).iterrows()]
         g = self._cagr(np_series)
         if g is None or g <= 0:
-            np_series_5 = [self._sf(r.get("n_income_attr_p")) for _, r in income_df.head(5).iterrows()]
+            np_series_5 = [(str(r.get("end_date", ""))[:8], self._sf(r.get("n_income_attr_p")))
+                          for _, r in income_df.head(5).iterrows()]
             g = self._cagr(np_series_5)
         if g is None or g <= 0:
             return None
 
         g_pct = g * 100
         if g_pct > 80:
-            np_series_5 = [self._sf(r.get("n_income_attr_p")) for _, r in income_df.head(5).iterrows()]
+            np_series_5 = [(str(r.get("end_date", ""))[:8], self._sf(r.get("n_income_attr_p")))
+                          for _, r in income_df.head(5).iterrows()]
             g5 = self._cagr(np_series_5)
             if g5 is not None and g5 > 0:
                 g_pct = g5 * 100
@@ -942,76 +1019,76 @@ class ValuationEngine:
     # ------------------------------------------------------------------
 
     def reverse_valuation(self, wacc_data: dict, classification: dict) -> dict:
-        """Reverse-engineer what growth the current price implies."""
+        """Conditioned five-year DCF inverse and separately labelled Gordon diagnostic."""
         bi = self._basic_info()
-        close = bi.get("close")
-        pe = bi.get("pe_ttm")
-        mkt_cap_mm = bi.get("mkt_cap_mm")
-        if not close or not mkt_cap_mm or mkt_cap_mm <= 0:
-            return {}
-
-        wacc = wacc_data["wacc"]
+        close, cap = bi.get("close"), bi.get("mkt_cap_mm")
+        if close is None or close <= 0 or cap is None or cap <= 0:
+            return {"status": "INSUFFICIENT_DATA", "reason": "positive price and market cap are required"}
         ke = wacc_data["ke"]
-
-        # Actual growth rates (from classification)
-        actual_np_cagr = classification.get("np_cagr_pct")
-        actual_rev_cagr = classification.get("rev_cagr_pct")
-
-        # --- Method 1: Reverse perpetual DCF ---
-        # Market_Cap = FCF / (WACC - g) → g = WACC - FCF/Market_Cap
-        cf_df = self._annual_df("cashflow")
-        fcf_list = []
-        for _, r in cf_df.head(3).iterrows():
-            ocf = self._sf(r.get("n_cashflow_act"))
-            capex = self._sf(r.get("c_pay_acq_const_fiolta"))
-            if ocf is not None and capex is not None:
-                fcf_list.append(ocf - abs(capex))
-        fcf_base_mm = (statistics.mean(fcf_list) / 1e6) if fcf_list else None
-
-        implied_g_fcf = None
-        fcf_yield = None
-        if fcf_base_mm and mkt_cap_mm > 0:
-            fcf_yield = fcf_base_mm / mkt_cap_mm * 100
-            implied_g_fcf = wacc - fcf_yield
-
-        # --- Method 2: Reverse PE (E/P = Ke - g) ---
-        implied_g_earnings = None
-        ep_ratio = None
-        if pe and pe > 0:
-            ep_ratio = 1 / pe * 100
-            implied_g_earnings = ke - ep_ratio
-
-        # --- Method 3: Reverse DDM (P = DPS*(1+g)/(Ke-g)) ---
-        annual_dps = self._aggregate_annual_dps()
-        implied_g_dividend = None
-        dps_latest = None
-        div_yield = None
-        if annual_dps and close > 0:
-            dps_latest = annual_dps[0][1]
-            div_yield = dps_latest / close * 100
-            # P = DPS*(1+g)/(Ke-g) → g = (P*Ke - DPS) / (P + DPS)
-            implied_g_dividend = (close * ke / 100 - dps_latest) / (close + dps_latest) * 100
-
-        # --- Method 4: Implied WACC (if actual growth is achieved) ---
-        actual_fcf_growth = classification.get("np_cagr_pct")  # proxy
-        implied_wacc = None
-        if fcf_yield is not None and actual_fcf_growth is not None:
-            implied_wacc = fcf_yield + actual_fcf_growth
-
-        return {
-            "fcf_yield": fcf_yield,
-            "implied_g_fcf": implied_g_fcf,
-            "ep_ratio": ep_ratio,
-            "implied_g_earnings": implied_g_earnings,
-            "div_yield": div_yield,
-            "implied_g_dividend": implied_g_dividend,
-            "implied_wacc": implied_wacc,
-            "actual_np_cagr": actual_np_cagr,
-            "actual_rev_cagr": actual_rev_cagr,
-            "dps_latest": dps_latest,
-            "wacc": wacc,
-            "ke": ke,
+        result = {
+            "fcf_yield": None, "implied_g_fcf": None, "implied_wacc": None,
+            "ep_ratio": None, "implied_g_earnings": None,
+            "div_yield": None, "implied_g_dividend": None, "dps_latest": None,
+            "actual_np_cagr": classification.get("np_cagr_pct"),
+            "actual_rev_cagr": classification.get("rev_cagr_pct"),
+            "actual_fcf_cagr": None, "wacc": wacc_data["wacc"], "ke": ke,
+            "reverse_model": "Gordon period-zero cash-flow diagnostic; not a five-year DCF inverse",
+            "earnings_growth_status": "not identified: payout and reinvestment assumptions are not supplied",
         }
+        pe = bi.get("pe_ttm")
+        if pe is not None and pe > 0:
+            result["ep_ratio"] = 100 / pe
+        context = self._dcf_context(wacc_data, "Reverse_DCF")
+        if context is not None:
+            records = self._contract_cashflows(context, "Reverse_DCF")
+            if records:
+                records = records[:3]
+                base = statistics.mean([value for _, value in records])
+                market_value = cap * 1e6
+                if context["basis"] == "FCFF":
+                    market_value = market_value - context["cash"] + context["debt"] - context["other"]
+                if base > 0 and market_value > 0:
+                    growth = implied_perpetual_growth(base, market_value, context["rate"] / 100)
+                    # Forward reconstruction uses the same Gordon function.
+                    reconstructed = perpetuity_value(base, context["rate"] / 100, growth)
+                    result.update({
+                        "fcf_yield": base / market_value * 100,
+                        "implied_g_fcf": growth * 100,
+                        "cashflow_basis": context["basis"], "discount_rate_basis": context["rate_basis"],
+                        "cashflow_base": base, "reference_value": market_value,
+                        "reconstructed_value": reconstructed,
+                    })
+                    terminal = self._sf(context["contract"].get("terminal_growth_pct"))
+                    if terminal is None:
+                        result["five_year_dcf"] = {"status": "INSUFFICIENT_DATA", "reason": "explicit terminal_growth_pct required for five-year inverse"}
+                    else:
+                        bounds_pct = context["contract"].get("reverse_growth_bounds_pct", [-99, 300])
+                        if not isinstance(bounds_pct, list) or len(bounds_pct) != 2 or any(self._sf(v) is None or isinstance(v, bool) for v in bounds_pct):
+                            raise ValueError("reverse_growth_bounds_pct must contain two finite numbers")
+                        solved = implied_stable_growth(base, market_value, context["rate"] / 100, terminal / 100,
+                                                       bounds=[float(v) / 100 for v in bounds_pct])
+                        independent = self._sf(context["contract"].get("stable_growth_pct"))
+                        solved.update(cashflow_basis=context["basis"], discount_rate_basis=context["rate_basis"],
+                                      implied_growth_pct=solved["implied_growth"] * 100 if solved.get("implied_growth") is not None else None,
+                                      independent_growth_pct=independent,
+                                      gap_pct_points=independent - solved["implied_growth"] * 100 if independent is not None and solved.get("implied_growth") is not None else None,
+                                      value_bridge="same FCFF/FCFE bridge as forward stable DCF")
+                        result["five_year_dcf"] = solved
+                        result["reverse_model"] = "five-year stable DCF inverse (one variable); separate Gordon diagnostic"
+                    actual = self._cagr(records)
+                    if actual is not None and actual > -1:
+                        result["actual_fcf_cagr"] = actual * 100
+                        result["implied_wacc"] = (base * (1 + actual) / market_value + actual) * 100
+        annual_dps = self._aggregate_annual_dps()
+        if annual_dps:
+            dps = annual_dps[0][1]
+            if dps > 0 and ke is not None and ke > 0:
+                result["dps_latest"] = dps
+                result["div_yield"] = dps / close * 100
+                result["implied_g_dividend"] = implied_perpetual_growth(dps, close, ke / 100) * 100
+        result["status"] = ("COMPUTED" if result["implied_g_fcf"] is not None
+                            else "PARTIAL" if result["implied_g_dividend"] is not None else "INSUFFICIENT_DATA")
+        return result
 
     # ------------------------------------------------------------------
     # 10. Cross-validation
@@ -1139,15 +1216,15 @@ class ValuationEngine:
         lines.append("")
         w = wacc_data
         wacc_rows = [
-            ["Rf (无风险利率)", self._fmt_pct(w["rf"]), "§14"],
-            ["Beta", f"{w['beta']:.1f}", "市值分档"],
-            ["ERP (股权风险溢价)", self._fmt_pct(w["erp"]), f"{self.market}市场默认"],
+            ["Rf (无风险利率)", self._fmt_pct(w["rf"]), w.get("parameter_sources", {}).get("rf", "§14")],
+            ["Beta", f"{w['beta']:.1f}", w.get("parameter_sources", {}).get("beta", "市值分档代理")],
+            ["ERP (股权风险溢价)", self._fmt_pct(w["erp"]), w.get("parameter_sources", {}).get("erp", f"{self.market}市场默认假设")],
             ["**Ke (权益成本)**", f"**{self._fmt_pct(w['ke'])}**", "CAPM"],
-            ["Kd (税前债务成本)", self._fmt_pct(w["kd_pre"]), "§3/§4"],
-            ["有效税率", self._fmt_pct(w["tax_rate"]), "§3 五年均值"],
+            ["Kd (税前债务成本)", self._fmt_pct(w["kd_pre"]), w.get("parameter_sources", {}).get("kd_pre", "§3/§4")],
+            ["有效税率", self._fmt_pct(w["tax_rate"]), w.get("parameter_sources", {}).get("tax_rate", "§3 五年均值")],
             ["E/(D+E)", self._fmt_pct(w["e_weight"]), "市值权重"],
             ["D/(D+E)", self._fmt_pct(w["d_weight"]), "债务权重"],
-            ["**WACC**", f"**{self._fmt_pct(w['wacc'])}**", "加权平均"],
+            ["**WACC**", f"**{self._fmt_pct(w['wacc'])}**", w.get("parameter_sources", {}).get("wacc", "加权平均")],
         ]
         lines.append(format_table(["参数", "值", "来源"], wacc_rows, alignments=["l", "r", "l"]))
         lines.append("")
@@ -1157,6 +1234,11 @@ class ValuationEngine:
         # --- Section 3: Method Details ---
         lines.append(format_header(2, "三、估值方法详情"))
         lines.append("")
+        if self.method_status:
+            lines.append(format_table(["方法", "状态", "口径或缺口"],
+                                      [[name, state["status"], state.get("reason", state.get("basis", ""))]
+                                       for name, state in self.method_status.items()]))
+            lines.append("")
 
         for i, result in enumerate(method_results):
             if result is None:
@@ -1166,8 +1248,11 @@ class ValuationEngine:
             lines.append("")
 
             if method_name == "DCF":
+                lines.append(f"- 现金流/折现率: {result.get('cashflow_basis')} / {result.get('discount_rate_basis')}")
+                lines.append(f"- 价值桥: {result.get('value_bridge')}")
                 lines.append(f"- FCF基线 (3yr均值): {format_number(result['fcf_base'])}")
                 lines.append(f"- 保守增长率: {self._fmt_pct(result['g_conservative'])}")
+                lines.append(f"- 增长率依据: {result.get('growth_source')}; 终值依据: {result.get('terminal_growth_source')}")
                 lines.append(f"- 永续增长率: {self._fmt_pct(result['g_terminal'])}")
                 lines.append(f"- 终值占比: {result['tv_pct']:.1f}%")
                 if result.get("all_negative"):
@@ -1175,11 +1260,11 @@ class ValuationEngine:
                 lines.append("")
                 lines.append(f"**内在价值: {self._fmt(result['intrinsic'])} {self._price_unit()}/股**")
                 lines.append("")
-                lines.append("#### 敏感性分析 (WACC × g_terminal)")
+                lines.append(f"#### 敏感性分析 ({result.get('discount_rate_basis')} × g_terminal)")
                 lines.append("")
                 lines.append(self._render_sensitivity(
                     result["sensitivity"], result["wacc_range"], result["g_range"],
-                    "WACC", "g_terminal"))
+                    result.get("discount_rate_basis", "WACC"), "g_terminal"))
 
             elif method_name == "DCF_Scenarios":
                 lines.append(f"- 历史营收CAGR: {self._fmt_pct(result['rev_cagr_pct'])}")
@@ -1187,11 +1272,11 @@ class ValuationEngine:
                 lines.append("")
                 sc = result["scenarios"]
                 sc_rows = [
-                    ["乐观 (25%)", self._fmt_pct(sc["optimistic"]["growth"][0]),
+                    [f"乐观 ({sc['optimistic']['probability']:.0%})", self._fmt_pct(sc["optimistic"]["growth"][0]),
                      self._fmt(sc["optimistic"]["value"])],
-                    ["基准 (50%)", self._fmt_pct(sc["base"]["growth"][0]),
+                    [f"基准 ({sc['base']['probability']:.0%})", self._fmt_pct(sc["base"]["growth"][0]),
                      self._fmt(sc["base"]["value"])],
-                    ["悲观 (25%)", self._fmt_pct(sc["pessimistic"]["growth"][0]),
+                    [f"悲观 ({sc['pessimistic']['probability']:.0%})", self._fmt_pct(sc["pessimistic"]["growth"][0]),
                      self._fmt(sc["pessimistic"]["value"])],
                 ]
                 lines.append(format_table(["情景", "营收增速", "每股价值"], sc_rows, alignments=["l", "r", "r"]))
@@ -1332,6 +1417,12 @@ class ValuationEngine:
 
         rv = reverse
         if rv:
+            lines.append(f"- 反解范围: {rv.get('reverse_model', 'unavailable')}")
+            lines.append(f"- 盈利增长识别限制: {rv.get('earnings_growth_status', 'unavailable')}")
+            solved = rv.get("five_year_dcf", {})
+            if solved:
+                lines.append(f"- 五年DCF反解状态: {solved.get('status')}; 初始现金流增速 {self._fmt_pct(solved.get('implied_growth_pct'))}; 独立假设 {self._fmt_pct(solved.get('independent_growth_pct'))}; 差异 {self._fmt(solved.get('gap_pct_points'))} 个百分点。")
+                lines.append("- 固定现金流基期、折现率、终值增长、五年期限与渐降路径；反解仅识别一个变量，不能唯一识别量、价与利润率。")
             rv_rows = []
 
             # Row 1: Implied earnings growth
@@ -1349,17 +1440,17 @@ class ValuationEngine:
             rv_rows.append([
                 "分红增长 (DDM反解)",
                 self._fmt_pct(ig_d) if ig_d is not None else "—",
-                "DPS 历史高增长（支付率扩张期）",
+                "以当前DPS为期初现金流，其余假设固定",
                 "—",
             ])
 
             # Row 3: Implied FCF growth
             ig_f = rv.get("implied_g_fcf")
             rv_rows.append([
-                "FCF增长 (永续DCF反解)",
+                f"{rv.get('cashflow_basis', 'FCF')}增长 (Gordon诊断)",
                 self._fmt_pct(ig_f) if ig_f is not None else "—",
                 f"FCF收益率 {self._fmt_pct(rv.get('fcf_yield'))}",
-                f"WACC({self._fmt_pct(rv.get('wacc'))}) - FCF收益率" if rv.get("fcf_yield") else "—",
+                "g=(V×r−CF0)/(V+CF0)，同口径价值桥" if rv.get("fcf_yield") is not None else "—",
             ])
 
             lines.append(format_table(
@@ -1370,8 +1461,8 @@ class ValuationEngine:
             # Implied WACC
             iw = rv.get("implied_wacc")
             if iw is not None:
-                lines.append(f"**隐含要求回报率**: 若实际盈利增速 {self._fmt_pct(actual_np)} 兑现，"
-                             f"市场隐含要求回报率 ≈ {iw:.2f}%（vs 模型 WACC {self._fmt_pct(rv.get('wacc'))}）")
+                lines.append(f"**隐含要求回报率（条件诊断）**: 若历史现金流CAGR {self._fmt_pct(rv.get('actual_fcf_cagr'))} 持续，"
+                             f"市场隐含要求回报率为 {iw:.2f}%；历史增长不代表未来预测。")
                 lines.append("")
 
             # Growth discount summary
@@ -1431,7 +1522,7 @@ class ValuationEngine:
 
         # 2. WACC
         wacc_data = self.compute_wacc()
-        print(f"  WACC: {wacc_data['wacc']:.2f}%", file=sys.stderr)
+        print(f"  WACC: {self._fmt_pct(wacc_data['wacc'])}", file=sys.stderr)
 
         # 3. Run selected methods
         method_map = {
@@ -1455,6 +1546,7 @@ class ValuationEngine:
                         print(f"  {method_name}: 跳过 (数据不足)", file=sys.stderr)
                     results.append(result)
                 except Exception as e:
+                    self.method_status[method_name] = {"status": "INVALID_INPUT", "reason": str(e)}
                     print(f"  {method_name}: 失败 ({e})", file=sys.stderr)
                     results.append(None)
 
@@ -1477,40 +1569,76 @@ class ValuationEngine:
 # CLI
 # ---------------------------------------------------------------------------
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description="Valuation computation engine")
-    parser.add_argument("--code", required=True, help="Stock code (e.g., 600887)")
-    parser.add_argument("--output-dir", required=True, help="Output directory")
+    parser.add_argument("--code", help="Stock code (required for provider collection; optional consistency check with --dir)")
+    parser.add_argument("--output-dir", help="Provider-mode output directory; --dir uses the batch reports directory")
+    parser.add_argument("--dir", help="Current B2 batch directory; strictly offline A-share CSV reuse")
+    parser.add_argument("--contract", help="JSON cash-flow basis, projections and equity bridge contract")
+    parser.add_argument("--total-timeout", type=float, default=180)
+    parser.add_argument("--_valuation-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
         "--no-cache",
         action="store_true",
         help="Disable the TTL disk cache for financial endpoints (always fetch live)",
     )
-    args = parser.parse_args()
-
-    ts_code = validate_stock_code(args.code)
-    token = get_token()
-
-    # Import TushareClient here to keep module importable without tushare for testing
-    from tushare_collector import TushareClient
-
-    print(f"[valuation_engine] 正在采集 {ts_code} 数据...", file=sys.stderr)
-    client = TushareClient(token)
-    if args.no_cache:
-        client._cache_enabled = False
-    client.assemble_data_pack(ts_code)
-
-    print(f"[valuation_engine] 正在计算估值...", file=sys.stderr)
-    engine = ValuationEngine(ts_code, args.output_dir, client)
-    output_md = engine.run()
-
-    os.makedirs(args.output_dir, exist_ok=True)
-    out_path = os.path.join(args.output_dir, "valuation_computed.md")
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(output_md)
-
-    print(f"[valuation_engine] 完成: {out_path}", file=sys.stderr)
+    args = parser.parse_args(argv)
+    if not args.dir and (not args.code or not args.output_dir):
+        parser.error("provider mode requires --code and --output-dir; use --dir for offline batch reuse")
+    from valuation_snapshot import SnapshotError, ValuationSnapshot, load_json_object
+    try:
+        contract = None
+        if args.contract:
+            contract_path = Path(args.contract)
+            if args.dir and not contract_path.is_absolute():
+                contract_path = Path(args.dir) / contract_path
+            contract = load_json_object(contract_path)
+        ts_code = validate_stock_code(args.code) if args.code else None
+        if args.dir:
+            batch = Path(args.dir).resolve()
+            output_dir = batch / "reports"
+            if args.output_dir and Path(args.output_dir).resolve() != output_dir:
+                raise SnapshotError("OUTPUT_SCOPE", "--dir writes only reports/valuation_computed.md in the current batch")
+            client = ValuationSnapshot(batch, ts_code, contract)
+            ts_code = client.ts_code
+            print(f"[valuation_engine] 离线复用 {ts_code} 当前批次 CSV...", file=sys.stderr)
+        else:
+            output_dir = Path(args.output_dir)
+            token = get_token()
+            # Keep the provider dependency and all credential access on this branch.
+            from tushare_collector import TushareClient
+            print(f"[valuation_engine] 正在采集 {ts_code} 数据...", file=sys.stderr)
+            client = TushareClient(token)
+            if args.no_cache:
+                client._cache_enabled = False
+            client.assemble_data_pack(ts_code)
+            if contract is not None:
+                client._store["valuation_contract"] = contract
+        print("[valuation_engine] 正在计算估值...", file=sys.stderr)
+        engine = ValuationEngine(ts_code, str(output_dir), client)
+        output_md = engine.run()
+        if args.dir:
+            # Do not rewrite an unchanged calculation solely for wall-clock seconds.
+            import re
+            output_md = re.sub(r"(?m)^\*计算时间:.*?\*$", f"*数据快照采集时间: {client.collected_at.isoformat()}*", output_md)
+            output_md += "\n\n" + client.provenance_markdown()
+        out_path = output_dir / "valuation_computed.md"
+        from run_support import atomic_text
+        changed = atomic_text(out_path, output_md)
+        if args.dir:
+            print(json.dumps({"status": "COMPLETE_WITH_LIMITATIONS" if client.limitations else "COMPLETE",
+                              "mode": "offline_batch", "stock": ts_code, "output": str(out_path),
+                              "changed": changed, "limitations": client.limitations,
+                              "method_status": engine.method_status}, ensure_ascii=False, allow_nan=False))
+        print(f"[valuation_engine] 完成: {out_path}", file=sys.stderr)
+        return 0
+    except SnapshotError as exc:
+        print(json.dumps(exc.payload, ensure_ascii=False, allow_nan=False))
+        return 3 if exc.payload["status"] == "INSUFFICIENT_DATA" else 2
+    except (ValueError, TypeError, KeyError, OSError) as exc:
+        print(json.dumps({"status": "INVALID_INPUT", "code": "VALUATION_INPUT_ERROR", "detail": str(exc)}, ensure_ascii=False))
+        return 2
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -9,7 +9,7 @@
 1. `{output_dir}/valuation_computed.md` — Python 计算结果（分类 + WACC + 方法详情 + 敏感性表 + 假设清单）
 2. `{output_dir}/qualitative_report.md` — 定性分析报告（D1-D6 六维分析 + 结构化参数表）
 3. `strategies/valuation/references/valuation_methods.md` — 方法论参考
-4. `strategies/valuation/references/report_template.md` — 报告模板
+4. `references/report-template.md` — 唯一主报告模板 v3
 5. `{output_dir}/data_pack_market.md` — 原始数据包（备查）
 
 ---
@@ -183,22 +183,17 @@ Python 默认使用 DPS CAGR 作为 DDM Phase 1 增长率。需要两层修正�
 
 ### Step 6: 报告组装
 
-读取 `report_template.md`，按模板组装最终报告，关键新增内容：
+读取 `references/report-template.md` v3，按统一十部分模板组装最终主报告。估值模块的内容映射如下：
 
-1. **报告概览 + Executive Summary** — 用调整后的数值
-2. **公司分类** — 直接引用 valuation_computed.md 的分类结果
-3. **WACC 计算** — 直接引用 valuation_computed.md
-4. **定性调整说明**（新增关键章节）：
-   - 逐一列出每个假设的调整过程
-   - 格式：Python默认值 → 定性信号 → 调整后值 → 依据
-5. **估值方法详情** — 引用 computed 的计算过程 + 标注调整后选取的敏感性坐标
-6. **交叉验证** — 包含调整前和调整后两组结果
-7. **反向估值** — 引用 valuation_computed.md 第五节，解读市场隐含增长预期；结合定性报告解释增长折价/溢价的合理性
-8. **估值结论** — 基于调整后数值 + 反向估值视角
-9. **关键假设与风险** — 列出核心假设及其定性调整
-10. **免责声明**
+1. **第 1 章投资摘要** — 写入估值判断、关键数字和估值限制
+2. **第 6 章估值分析** — 写入公司分类、WACC、定性调整、估值方法详情、交叉验证和反向估值
+3. **第 7 章投资建议与目标价** — 写入三情景目标价、概率加权目标价和双轨结论；龟龟价格与券商目标价分开
+4. **第 9 章风险与反证条件** — 写入估值假设风险、尾部压力测试和反证条件
+5. **第 10 章附录** — 写入来源、方法、图表、复验记录和免责声明
 
-写入 `{output_dir}/{company}_{code}_估值报告.md`
+其余章节仍必须保留并填入对应事实、数据依据和本节结论；不适用项写明原因，不得删除或合并。
+
+写入 `{output_dir}/{company}_{code}_分析报告.md`，完成后运行 `scripts/report_template_qc.py`。
 
 ---
 
@@ -208,7 +203,7 @@ Python 默认使用 DPS CAGR 作为 DDM Phase 1 增长率。需要两层修正�
 |---|--------|
 | 1 | 每个定性调整都有明确的 D1-D6 依据 |
 | 2 | 调整后的值均来自敏感性表（非自行计算） |
-| 3 | Executive Summary 的数字与正文一致 |
+| 3 | 第 1、6、7 章的估值数字与正文及机器输出一致 |
 | 4 | 交叉验证权重总和 = 100% |
 | 5 | 包含调整前/调整后对比 |
 | 6 | 反向估值章节存在，且解读了增长折价含义 |

@@ -145,17 +145,24 @@ def compute_sotp(cfg: dict) -> dict:
     implied_pe = (price * shares) / np_denom if np_denom else None
 
     top2 = sorted(out_segs, key=lambda o: -o["value"])[:2]
+    all_equity_basis = all(o["basis"] == "net_profit" for o in out_segs)
+    basis_label = "估算股权价值" if all_equity_basis and net_cash == 0 and minority == 0 else "估算分部价值"
+    basis_warning = ("净利润×PE已经得到股权价值，再调整净债务或少数股东可能重复计算。"
+                     if all_equity_basis and (net_cash != 0 or minority != 0) else "")
+    price_view = ("现价高于中枢，需验证盈利与估值假设。" if premium > 0
+                  else "现价低于中枢，但分部利润与倍数均为假设，不能直接视为折价机会。")
+    pe_view = (f"市场隐含整体 PE≈{implied_pe:.1f}x，"
+               f"{'高于' if implied_pe > weighted_pe else '低于' if implied_pe < weighted_pe else '接近'}"
+               f" SOTP 加权 PE≈{weighted_pe:.1f}x。") if implied_pe is not None and weighted_pe is not None else ""
     conclusion = (
-        f"SOTP 分部估值：{len(out_segs)} 个分部按各自估值锚加总，EV≈{ev:.0f} 亿元"
+        f"SOTP 分部估值：{len(out_segs)} 个分部按各自估值锚加总，{basis_label}≈{ev:.0f} 亿元"
         f"（区间 [{ev_low:.0f}, {ev_high:.0f}]），经控股折价 {holding_discount:.2f}×、净现金 {net_cash:.1f} 亿、"
         f"少数股东 −{minority:.1f} 亿后，股权价值≈{equity:.0f} 亿，每股 SOTP={per:.1f} 元"
         f"（区间 [{per_low:.1f}, {per_high:.1f}]）。现价 {price:.2f} 元较 SOTP 中枢溢价 {premium*100:.0f}%"
         f"{'、且高于 SOTP 乐观区间上沿 ' + f'{per_high:.1f}' + ' 元' if price > per_high else ''}。"
         f"价值贡献前二分部为「{top2[0]['name']}」（{top2[0]['value']:.0f} 亿，{top2[0]['pct']*100:.0f}%）与"
         f"「{top2[1]['name']}」（{top2[1]['value']:.0f} 亿，{top2[1]['pct']*100:.0f}%）。"
-        f"市场隐含整体 PE≈{implied_pe:.1f}x，显著高于 SOTP 加权 PE≈{weighted_pe:.1f}x——"
-        f"现价超出 SOTP 的部分为市场对全平台的主题/成长溢价，而非当期盈利支撑；"
-        f"若主题/景气退潮，估值向 SOTP 中枢回归的压力大。"
+        f"{pe_view}{price_view}{basis_warning}"
     )
     return {
         "company": cfg.get("company", ""), "code": cfg.get("code", ""), "date": cfg.get("date", ""),

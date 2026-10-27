@@ -1,214 +1,363 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""复验助手（通用）：刷新数据 → 计算实际值 → 与《估值模型.json》基线预测对比
+﻿#!/usr/bin/env python3
+"""Bounded refresh and frozen-forecast verification. No timestamped backup copies.
 
-用法（复验时运行，需联网；在项目根目录执行）：
-    python scripts/verification.py [--code 002468]
-项目目录名需为 {市场}.{代码} {公司名} 格式，自动识别代码；输出控制台对比表 + data/验证快照.json。
-
-行业成本—价格数据（data/行业成本价格.csv）无稳定免费接口，复验时按
-references/framework.md §B2.2 手工刷新月度观测点（双源交叉验证），
-重跑 fetch_industry_cost_price.py 审计后更新图16 与跟踪台账。
+python verification.py --dir <batch> --code 600039 --offline
+python verification.py --dir <batch> --freeze --offline --code 600039
+A baseline is written once, with its input hash. Re-running never replaces it.
 """
-
 from __future__ import annotations
-
 import argparse
+import calendar
+import hashlib
 import json
+import math
 import re
+import sys
+from datetime import date, datetime, timezone
 from pathlib import Path
 
-import akshare as ak
-import numpy as np
+from run_support import atomic_json, now, run_process
+
+if __name__ == '__main__' and '--_verification-worker' not in sys.argv:
+    guard = argparse.ArgumentParser(add_help=False)
+    guard.add_argument('--total-timeout', type=float, default=240)
+    options, _ = guard.parse_known_args()
+    try:
+        result = run_process([sys.executable, '-u', str(Path(__file__).resolve()), *sys.argv[1:], '--_verification-worker'],
+                             timeout=options.total_timeout, heartbeat=10, label='复验总流程')
+    except ValueError as exc:
+        guard.error(str(exc))
+    raise SystemExit(124 if result['status']=='TIMEOUT' else result.get('exit_code') or (0 if result['status']=='PASS' else 1))
+
 import pandas as pd
-
-ROOT = Path.cwd()
-DATA = ROOT / "data"
-REPORTS = ROOT / "reports"
+from fetch_with_fallback import add_fetch_options, fetch_datasets
 
 
-def col(df, *keys):
-    for c in df.columns:
-        if all(k.upper() in c.upper() for k in keys):
-            return c
+def finite(value):
+    try:
+        n = float(value)
+        return n if math.isfinite(n) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def col(frame, *names):
+    if frame is None:
+        return None
+    return next((name for name in names if name in frame.columns), None)
+
+
+def load_frame(data, filename, warnings):
+    path = data / filename
+    try:
+        frame = pd.read_csv(path, dtype=str, encoding='utf-8-sig')
+        return frame if not frame.empty else None
+    except (OSError, ValueError, pd.errors.ParserError) as exc:
+        warnings.append(f'{filename} 不可用: {type(exc).__name__}')
+        return None
+
+
+def dated(frame, warnings, label):
+    key = col(frame, 'REPORT_DATE', '报告期', '报告日期', 'END_DATE', 'end_date')
+    if key is None:
+        warnings.append(f'{label} 缺少报告日期')
+        return None
+    result = frame.copy()
+    result['_date'] = pd.to_datetime(result[key], errors='coerce')
+    if result['_date'].duplicated().any():
+        warnings.append(f'{label} 有重复日期，保留末条并需核对披露版本')
+    return result.dropna(subset=['_date']).sort_values('_date').drop_duplicates('_date', keep='last')
+
+
+def at(frame, date, names):
+    key = col(frame, *names)
+    if frame is None or key is None:
+        return None
+    rows = frame.loc[frame['_date'].eq(date), key]
+    return finite(rows.iloc[-1]) if len(rows) else None
+
+
+def fingerprint_file(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _has_prediction_values(value):
+    """Return whether a forecast/scenario tree contains a finite prediction."""
+    if isinstance(value, dict):
+        ignored = {'probability', 'weight', 'confidence', 'status', 'source', 'unit', 'currency', 'scope', 'basis',
+                   'id', 'metric', 'period', 'date', 'period_end', 'entity', 'source_ref', 'published_at', 'observed_at'}
+        for key, item in value.items():
+            if str(key).lower() in ignored:
+                continue
+            if isinstance(item, (dict, list)) and _has_prediction_values(item):
+                return True
+            if not isinstance(item, (dict, list, bool)) and finite(item) is not None:
+                return True
+    elif isinstance(value, list):
+        return any(_has_prediction_values(item) if isinstance(item, (dict, list))
+                   else not isinstance(item, bool) and finite(item) is not None for item in value)
+    return False
+
+
+def freeze_baseline(project):
+    project = Path(project)
+    target = project / 'input' / '预测基线.json'
+    if target.exists():
+        return json.loads(target.read_text(encoding='utf-8-sig')), False
+    source = next((p for p in (project/'input/研究模型.json', project/'input/估值模型.json', project/'reports/估值模型.json') if p.is_file()), None)
+    if source is None:
+        raise ValueError('没有可冻结的研究模型或估值模型输入')
+    model = json.loads(source.read_text(encoding='utf-8-sig'))
+    if not isinstance(model, dict):
+        raise ValueError('冻结模型必须为JSON对象')
+    # Writing an empty scaffold would create a misleading immutable baseline.
+    if not (_has_prediction_values(model.get('forecast')) or _has_prediction_values(model.get('scenarios'))):
+        raise ValueError('模型尚无预测，不能冻结空基线')
+    payload = {'schema_version':1, 'frozen_at':now(), 'source':str(source.relative_to(project)),
+               'source_sha256':fingerprint_file(source), 'model':model}
+    # Serialize before exclusive creation so unsupported values cannot leave
+    # an empty file that looks like an immutable frozen baseline.
+    serialized = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + '\n'
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # Exclusive creation ensures a concurrent invocation cannot replace an established baseline.
+        with target.open('x', encoding='utf-8', newline='\n') as stream:
+            stream.write(serialized)
+            stream.flush()
+    except FileExistsError:
+        return json.loads(target.read_text(encoding='utf-8-sig')), False
+    return payload, True
+
+
+def _period_end(value):
+    """Resolve an annual, quarter, or ISO forecast period to its period end."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    try:
+        if re.fullmatch(r'\d{4}', text):
+            return date(int(text), 12, 31)
+        match = re.fullmatch(r'(\d{4})[- ]?[Qq]([1-4])', text)
+        if match:
+            year, quarter = map(int, match.groups())
+            month = quarter * 3
+            return date(year, month, calendar.monthrange(year, month)[1])
+        return date.fromisoformat(text[:10])
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _parse_instant(value):
+    """Parse ISO dates/timestamps as UTC instants; date-only values mean midnight UTC."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _comparison_instant(actual):
+    for key in ('published_at', 'observed_at', 'date', 'period_end'):
+        value = actual.get(key)
+        if isinstance(value, str):
+            parsed = _parse_instant(value)
+            if parsed is not None:
+                return parsed
+            parsed_date = _period_end(value)
+            if parsed_date is not None:
+                return datetime.combine(parsed_date, datetime.min.time(), timezone.utc)
     return None
 
 
-def fetch(fname: str, fn, retries: int = 2) -> pd.DataFrame | None:
-    for i in range(1, retries + 1):
-        try:
-            df = fn()
-            if df is not None and not df.empty:
-                tmp = (DATA / fname).with_suffix(".tmp")
-                df.to_csv(tmp, index=False, encoding="utf-8-sig")
-                tmp.replace(DATA / fname)
-                print(f"[刷新] {fname}: {len(df)} 行")
-                return df
-        except Exception as exc:
-            print(f"[刷新] {fname} 第{i}次失败: {exc}")
-    print(f"[刷新] {fname} 失败，沿用本地数据")
-    return None
+def _frozen_instant(value):
+    parsed = _parse_instant(value)
+    if parsed is not None:
+        return parsed
+    parsed_date = _period_end(value)
+    return datetime.combine(parsed_date, datetime.min.time(), timezone.utc) if parsed_date else None
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--code", help="6 位股票代码（默认从项目目录名识别）")
-    args = parser.parse_args()
+def compare_predictions(forecasts, actuals, frozen_at=None):
+    """Compare unique, identical records only when the target was forward at freeze.
 
-    m = re.search(r"([A-Z]{2})\.(\d{6})", ROOT.name) if ROOT.name else None
-    if args.code:
-        code = args.code
-        market = "SH" if code.startswith(("6", "9")) else ("BJ" if code.startswith(("4", "8", "92")) else "SZ")
-    elif m:
-        market, code = m.group(1), m.group(2)
+    Actuals need a publication, observation, or explicit period-end date. Zero
+    and negative forecasts retain signed/absolute errors without percentage
+    errors.  Missing periods, duplicate actuals and absent baselines never score.
+    """
+    results = []
+    keys = ('metric', 'period', 'unit', 'scope', 'basis')
+    frozen_instant = _frozen_instant(frozen_at)
+    for forecast in forecasts if isinstance(forecasts, list) else []:
+        if not isinstance(forecast, dict):
+            continue
+        estimate = None if isinstance(forecast.get('value'), bool) else finite(forecast.get('value'))
+        row = {'id':forecast.get('id'), 'metric':forecast.get('metric'), 'period':forecast.get('period'),
+               'status':'NOT_COMPARABLE', 'reason':None, 'forecast':estimate, 'actual':None}
+        if all(isinstance(forecast.get(k), str) and forecast[k].strip() for k in keys):
+            actual_rows = actuals if isinstance(actuals, list) else []
+            matches = [a for a in actual_rows if isinstance(a, dict) and all(a.get(k)==forecast[k] for k in keys)
+                       and all((key not in forecast and key not in a) or a.get(key)==forecast.get(key) for key in ('entity', 'currency'))]
+            if len(matches) != 1:
+                row['reason'] = 'ACTUAL_MISSING_OR_DUPLICATE'
+                results.append(row)
+                continue
+            actual = None if isinstance(matches[0].get('value'), bool) else finite(matches[0].get('value'))
+            observed = _comparison_instant(matches[0]) if len(matches)==1 else None
+            target_period_end = _period_end(forecast.get('period'))
+            if frozen_instant is None:
+                row['reason'] = 'NO_FROZEN_DATE'
+            elif target_period_end is None or target_period_end <= frozen_instant.date():
+                row['reason'] = 'TARGET_PERIOD_NOT_FORWARD'
+            elif observed is None:
+                row['reason'] = 'ACTUAL_DATE_MISSING'
+            elif observed < frozen_instant:
+                row['reason'] = 'OBSERVATION_BEFORE_FREEZE'
+            elif actual is None or row['forecast'] is None:
+                row['reason'] = 'VALUE_MISSING_OR_INVALID'
+            else:
+                error = finite(actual-row['forecast'])
+                if error is None:
+                    row['reason'] = 'VALUE_MISSING_OR_INVALID'
+                else:
+                    row.update(status='COMPARED', reason=None, actual=actual, error=error, absolute_error=abs(error),
+                               relative_error=finite(error/row['forecast']) if row['forecast']>0 else None)
+        else:
+            row['reason'] = 'METADATA_MISSING'
+        results.append(row)
+    comparable = [r for r in results if r['status']=='COMPARED']
+    return {'records':results, 'n':len(comparable), 'mae':sum(r['absolute_error']/len(comparable) for r in comparable) if comparable else None,
+            'mean_signed_error':sum(r['error']/len(comparable) for r in comparable) if comparable else None,
+            'interpretation':'同口径经营预测误差；不是投资胜率或收益回测'}
+
+
+def verify(project, code, market, *, offline=False, freeze=False, fetch_options=None):
+    project = Path(project).resolve()
+    data = project/'data'
+    warnings = []
+    refresh = {'status':'OFFLINE', 'note':'使用存量数据，未刷新为最新披露'}
+    if not offline:
+        refresh = fetch_datasets(code, market, data, items={'sheets','indicators','daily','profile'}, **(fetch_options or {}))
+        if refresh['status'] != 'PASS':
+            warnings.append('本轮部分拉取失败；旧文件保留，不代表本轮更新成功')
+    baseline_path = project/'input/预测基线.json'
+    if freeze:
+        frozen, created = freeze_baseline(project)
+        print('[基线] ' + ('已冻结' if created else '沿用原冻结版本'), flush=True)
+    elif baseline_path.is_file():
+        frozen = json.loads(baseline_path.read_text(encoding='utf-8-sig'))
     else:
-        print("❌ 无法识别股票代码，请用 --code 指定")
-        return
-
-    print("=" * 66)
-    print(f"{ROOT.name} 复验助手：数据刷新 + 预测对比（基线见 reports/估值模型.json）")
-    print("=" * 66)
-
-    em_symbol = f"{market}{code}"
-    fetch("利润表_按报告期.csv",
-          lambda: ak.stock_profit_sheet_by_report_em(symbol=em_symbol))
-    fetch("资产负债表_按报告期.csv",
-          lambda: ak.stock_balance_sheet_by_report_em(symbol=em_symbol))
-    fetch("主要财务指标_按报告期.csv",
-          lambda: ak.stock_financial_analysis_indicator_em(
-              symbol=f"{code}.{market}", indicator="按报告期"))
-    # 日线刷新：优先腾讯源（与 research_pipeline/fetch_supplement/图表同源，避免新浪/腾讯行数差异覆盖不一致）；
-    # 刷新前先备份现有 CSV（保留原源数据可回溯）。
-    daily_src = Path(DATA / "日线股价.csv")
-    if daily_src.exists():
-        bak = daily_src.with_suffix(".bak_" + pd.Timestamp.now().strftime("%Y%m%d_%H%M"))
-        daily_src.replace(bak)
-        print(f"[备份] 日线股价.csv -> {bak.name}")
-    daily = None
-    for src_name, fn in [
-        ("腾讯", lambda: ak.stock_zh_a_hist_tx(
-            symbol=f"{market.lower()}{code}", start_date="20000101",
-            end_date="20991231", adjust="")),
-        ("新浪", lambda: ak.stock_zh_a_daily(symbol=f"{market.lower()}{code}")),
-    ]:
-        try:
-            daily = fn()
-            if daily is not None and not daily.empty:
-                daily.to_csv(daily_src, index=False, encoding="utf-8-sig")
-                print(f"[刷新] 日线股价.csv（{src_name}源）: {len(daily)} 行")
-                break
-        except Exception as exc:
-            print(f"[刷新] 日线（{src_name}源）失败: {exc}")
-    if daily is None:
-        print("[刷新] 日线两源均失败，沿用本地备份")
-
-    inc = pd.read_csv(DATA / "利润表_按报告期.csv", dtype=str)
-    bs = pd.read_csv(DATA / "资产负债表_按报告期.csv", dtype=str)
-    ind = pd.read_csv(DATA / "主要财务指标_按报告期.csv", dtype=str)
-    px = pd.read_csv(DATA / "日线股价.csv", dtype=str)
-
-    dc_i = col(inc, "REPORT", "DATE")
-    inc[dc_i] = pd.to_datetime(inc[dc_i], errors="coerce")
-    inc = inc.dropna(subset=[dc_i]).sort_values(dc_i)
-    ni_col = "PARENT_NETPROFIT"
-    inc[ni_col] = pd.to_numeric(inc[ni_col], errors="coerce")
-    latest_q = inc.iloc[-1]
-    ann_ni = {int(r[dc_i].year): r[ni_col] for _, r in inc[inc[dc_i].dt.month == 12].iterrows()}
-
-    d = latest_q[dc_i]
-    cum = latest_q[ni_col]
-    if d.month == 12:
-        ttm_ni = cum
-    else:
-        prev_ann = ann_ni.get(d.year - 1, np.nan)
-        prev_same = inc[(inc[dc_i].dt.year == d.year - 1) & (inc[dc_i].dt.month == d.month)]
-        prev_same_v = prev_same.iloc[0][ni_col] if not prev_same.empty else np.nan
-        ttm_ni = cum + prev_ann - prev_same_v if np.isfinite(prev_ann) and np.isfinite(prev_same_v) else np.nan
-
-    eq_c = col(bs, "TOTAL_PARENT_EQUITY")
-    bps_c = col(ind, "BPS")
-    dc_b = col(bs, "REPORT", "DATE")
-    dc_n = col(ind, "REPORT", "DATE")
-    bs[dc_b] = pd.to_datetime(bs[dc_b], errors="coerce")
-    ind[dc_n] = pd.to_datetime(ind[dc_n], errors="coerce")
-    bs[eq_c] = pd.to_numeric(bs[eq_c], errors="coerce")
-    ind[bps_c] = pd.to_numeric(ind[bps_c], errors="coerce")
-    eq_now = bs.loc[bs[dc_b] == d, eq_c]
-    bps_now = ind.loc[ind[dc_n] == d, bps_c]
-    shares = float(eq_now.iloc[0]) / float(bps_now.iloc[0]) if not eq_now.empty and not bps_now.empty else np.nan
-    # 2026-08-23 中远海控批次校准：总股本优先取 公司概况.csv（腾讯实时，含回购注销），
-    # 净资产/BPS 推算值为最新报告期口径，二者偏差>2% 时告警
-    prof_f = DATA / "公司概况.csv"
-    if prof_f.exists():
-        try:
-            pdf = pd.read_csv(prof_f, encoding="utf-8-sig", dtype=str)
-            pvals = dict(zip(pdf.iloc[:, 0], pdf.iloc[:, 1]))
-            for k, v in pvals.items():
-                if "总股本" in str(k):
-                    p_shares = float(v) / 1e6
-                    if np.isfinite(shares) and abs(p_shares - shares) / shares > 0.02:
-                        print(f"[WARN] 股本口径偏差：公司概况 {p_shares:.2f} 百万股 vs 净资产/BPS 推算 {shares:.2f} 百万股（采用公司概况）")
-                    shares = p_shares
-                    break
-        except Exception as exc:
-            print(f"[WARN] 读取公司概况失败: {exc}")
-
-    px_c = px.columns[0]
-    close_c = [c for c in px.columns if "close" in c.lower() or "收盘" in c][0]
-    px[px_c] = pd.to_datetime(px[px_c], errors="coerce")
-    px[close_c] = pd.to_numeric(px[close_c], errors="coerce")
-    px = px.dropna(subset=[px_c, close_c]).sort_values(px_c)
-    price = float(px.iloc[-1][close_c])
-    price_date = px.iloc[-1][px_c]
-
-    eps_ttm = ttm_ni / shares if np.isfinite(ttm_ni) and shares else np.nan
-    pe_ttm = price / eps_ttm if eps_ttm and eps_ttm > 0 else np.nan
-    pb = price / bps_now.iloc[0] if not bps_now.empty and bps_now.iloc[0] > 0 else np.nan
-    mkt_cap = price * shares / 1e8 if shares else np.nan
-
-    model_path = REPORTS / "估值模型.json"
-    model = json.loads(model_path.read_text(encoding="utf-8")) if model_path.exists() else {}
-    base_ni = model.get("scenarios", {}).get("基准", {})
-    target = model.get("target_price")
-
-    print("\n实际值 vs 基线：")
-    rows = [
-        ("最新报告期", str(latest_q[dc_i].date()), ""),
-        ("最新累计归母净利(亿)", round(float(cum) / 1e8, 2),
-         f"基准全年 {base_ni.get('2026', '?')} 亿" if base_ni else ""),
-        ("TTM 归母净利(亿)", round(ttm_ni / 1e8, 2) if np.isfinite(ttm_ni) else None, ""),
-        ("总股本(亿股)", round(shares / 1e8, 2) if shares else None, ""),
-        ("最新收盘(元)", round(price, 2), str(price_date.date())),
-        ("PE_TTM", round(pe_ttm, 1) if np.isfinite(pe_ttm) else None, ""),
-        ("PB", round(pb, 2) if np.isfinite(pb) else None, ""),
-        ("总市值(亿)", round(mkt_cap, 1) if np.isfinite(mkt_cap) else None, ""),
-        ("目标价", target, ""),
-    ]
-    for name, actual, note in rows:
-        print(f"  {name}: {actual}  ｜ {note}")
-
-    if np.isfinite(cum) and base_ni:
-        y = max((k for k in base_ni if str(k).isdigit()), key=lambda s: int(s))
-        progress = float(cum) / 1e8 / base_ni[y] * 100
-        print(f"\n{y}E 完成进度：{float(cum)/1e8:.2f} 亿 / {base_ni[y]} 亿 = {progress:.0f}%")
-
-    snap = {
-        "generated_at": pd.Timestamp.now().isoformat(timespec="seconds"),
-        "symbol": f"{market}.{code}", "latest_report_date": str(latest_q[dc_i].date()),
-        "latest_cumulative_ni_yi": round(float(cum) / 1e8, 2),
-        "ttm_ni_yi": round(ttm_ni / 1e8, 2) if np.isfinite(ttm_ni) else None,
-        "shares_yi": round(shares / 1e8, 2) if shares else None,
-        "price": round(price, 2), "price_date": str(price_date.date()),
-        "pe_ttm": round(pe_ttm, 1) if np.isfinite(pe_ttm) else None,
-        "pb": round(pb, 2) if np.isfinite(pb) else None,
-        "market_cap_yi": round(mkt_cap, 1) if np.isfinite(mkt_cap) else None,
-        "baseline": model,
-    }
-    (DATA / "验证快照.json").write_text(
-        json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("\n[完成] 快照已保存: data/验证快照.json")
-    print("下一步：将数字填入 reports/跟踪验证台账.md，偏差归因并更新 skill 迭代日志。")
+        legacy = next((p for p in (project/'input/估值模型.json', project/'reports/估值模型.json') if p.is_file()), None)
+        frozen = {'model':json.loads(legacy.read_text(encoding='utf-8-sig')) if legacy else {}, 'frozen_at':None}
+        warnings.append('无冻结预测基线；旧模型仅供参考，不能计入正式预测回测')
+    model = frozen.get('model', {})
+    income = dated(load_frame(data,'利润表_按报告期.csv',warnings),warnings,'利润表')
+    balance = dated(load_frame(data,'资产负债表_按报告期.csv',warnings),warnings,'资产负债表')
+    indicators = dated(load_frame(data,'主要财务指标_按报告期.csv',warnings),warnings,'财务指标')
+    report_date = income['_date'].iloc[-1] if income is not None and not income.empty else None
+    cum = ttm = shares = equity = bps = price = None
+    price_date = None
+    if report_date is not None:
+        cum = at(income,report_date,('PARENT_NETPROFIT','归母净利润','n_income_attr_p'))
+        if report_date.month == 12:
+            ttm = cum
+        else:
+            annual = at(income,pd.Timestamp(report_date.year-1,12,31),('PARENT_NETPROFIT','归母净利润','n_income_attr_p'))
+            prior = at(income,report_date-pd.DateOffset(years=1),('PARENT_NETPROFIT','归母净利润','n_income_attr_p'))
+            if all(v is not None for v in (cum,annual,prior)):
+                ttm = cum+annual-prior
+        equity = at(balance,report_date,('TOTAL_PARENT_EQUITY','归母权益','total_hldr_eqy_exc_min_int'))
+        bps = at(indicators,report_date,('BPS','每股净资产','bps'))
+        shares = equity/bps if equity is not None and bps is not None and bps>0 else None
+    profile = load_frame(data,'公司概况.csv',warnings)
+    if profile is not None and len(profile.columns)>=2:
+        for label, value in profile.iloc[:,:2].itertuples(index=False,name=None):
+            if '总股本' in str(label):
+                number = finite(value)
+                if number is not None and number>0:
+                    number *= 1e8 if '亿' in str(label) else 1e4 if '万' in str(label) else 1
+                    if shares is not None and abs(number/shares-1)>.02:
+                        warnings.append('概况股本与报表推算股本差异超过2%，须核对回购/股本日期')
+                    shares = number
+    prices = load_frame(data,'日线股价.csv',warnings)
+    dc = col(prices,'date','日期','trade_date')
+    pc = col(prices,'close','收盘','收盘价')
+    if dc and pc:
+        prices['_date'] = pd.to_datetime(prices[dc],errors='coerce')
+        prices['_price'] = pd.to_numeric(prices[pc],errors='coerce')
+        prices = prices.dropna(subset=['_date','_price']).sort_values('_date')
+        if len(prices):
+            price = finite(prices['_price'].iloc[-1])
+            price_date = str(prices['_date'].iloc[-1].date())
+    eps = ttm/shares if ttm is not None and shares is not None and shares>0 else None
+    pe = price/eps if price is not None and eps is not None and eps>0 else None
+    pb = price/bps if price is not None and bps is not None and bps>0 else None
+    cap = price*shares/1e8 if price is not None and shares is not None else None
+    baseline = model.get('scenarios',{}).get('基准',{})
+    if report_date is not None:
+        year = str(report_date.year)
+        fy = finite(baseline.get(year)) if isinstance(baseline,dict) else None
+        if fy is not None and fy>0 and cum is not None:
+            print(f'{year}E 完成进度：{cum/1e8:.2f} 亿元 / {fy} 亿元 = {cum/1e8/fy:.0%}（累计/全年，非预测误差）',flush=True)
+    actuals = []
+    if income is not None:
+        for _, row in income.iterrows():
+            if row['_date'].month==12:
+                value=at(income,row['_date'],('PARENT_NETPROFIT','归母净利润','n_income_attr_p'))
+                actuals.append({'metric':'net_profit_parent','period':str(row['_date'].year),'unit':'CNY','scope':'parent','basis':'reported','value':value,
+                                'period_end':str(row['_date'].date()), 'observed_at':now()})
+    explicit_actuals = model.get('verification_actuals', [])
+    if isinstance(explicit_actuals,list):
+        actuals.extend(explicit_actuals)
+    comparison = compare_predictions(model.get('forecast',{}).get('estimates',[]) if isinstance(model.get('forecast'),dict) else [],
+                                     actuals, frozen.get('frozen_at'))
+    if not frozen.get('frozen_at'):
+        comparison = {'records':[], 'n':0, 'mae':None, 'mean_signed_error':None, 'status':'NO_FROZEN_BASELINE'}
+    snap = {'schema_version':2,'generated_at':now(),'symbol':f'{market}.{code}',
+            'status':'INCOMPLETE' if report_date is None or cum is None or price is None else 'OK',
+            'latest_report_date':str(report_date.date()) if report_date is not None else None,
+            'latest_cumulative_ni_yi':round(cum/1e8,2) if cum is not None else None,
+            'ttm_ni_yi':round(ttm/1e8,2) if ttm is not None else None,
+            'shares_yi':round(shares/1e8,2) if shares is not None else None,
+            'price':price,'price_date':price_date,'pe_ttm':round(pe,1) if pe is not None else None,
+            'pb':round(pb,2) if pb is not None else None,'market_cap_yi':round(cap,1) if cap is not None else None,
+            'baseline':model,'baseline_frozen_at':frozen.get('frozen_at'), 'comparison':comparison,
+            'refresh_status':refresh['status'],'warnings':warnings,
+            'source_hashes':{p.name:fingerprint_file(p) for p in data.glob('*.csv')}}
+    atomic_json(data/'验证快照.json',snap)
+    print(f"[复验] {snap['status']}；数据刷新={refresh['status']}；同口径预测比较n={comparison['n']}",flush=True)
+    return snap
 
 
-if __name__ == "__main__":
-    main()
+def main(argv=None):
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--dir',default='.')
+    parser.add_argument('--code')
+    parser.add_argument('--offline',action='store_true')
+    parser.add_argument('--freeze',action='store_true')
+    parser.add_argument('--total-timeout',type=float,default=240)
+    parser.add_argument('--_verification-worker',action='store_true',help=argparse.SUPPRESS)
+    add_fetch_options(parser)
+    args=parser.parse_args(argv)
+    project=Path(args.dir).resolve()
+    match=next((re.search(r'(SH|SZ|BJ)\.(\d{6})',p.name) for p in (project,*project.parents) if re.search(r'(SH|SZ|BJ)\.(\d{6})',p.name)),None)
+    code=args.code or (match.group(2) if match else None)
+    if not code or not re.fullmatch(r'\d{6}',code):
+        parser.error('当前自动复验适配A股六位代码；请用 --code 指定，其他市场需专用数据适配')
+    market=match.group(1) if match and match.group(2)==code else 'SH' if code.startswith(('6','9')) else 'BJ' if code.startswith(('4','8','92')) else 'SZ'
+    try:
+        result=verify(project,code,market,offline=args.offline,freeze=args.freeze,
+                      fetch_options=dict(timeout=args.timeout,retries=args.retries,failure_ttl=args.failure_ttl,
+                                         force=args.force_refresh,total_budget=args.fetch_budget,success_ttl=args.success_ttl))
+        return 0 if result['status']=='OK' else 2
+    except (OSError,ValueError,KeyError,TypeError) as exc:
+        atomic_json(project/'data/验证快照.json',{'status':'FAIL','generated_at':now(),'error':str(exc)})
+        print(f'[复验] FAIL: {exc}',flush=True)
+        return 1
+
+
+if __name__=='__main__':
+    raise SystemExit(main())

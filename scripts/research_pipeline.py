@@ -8,12 +8,13 @@
     python research_pipeline.py "调研 温氏股份"
     python research_pipeline.py "调研 300498"
     python research_pipeline.py --company 温氏股份 --code 300498
-    python research_pipeline.py --data-dir "G:\\理财\\个股分析\\SZ.002714 牧原股份\\data" --audit-only
+    python research_pipeline.py --data-dir "G:\\理财\\个股分析\\SZ.002714 牧原股份\\2026_08_22\\data" --audit-only
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -22,109 +23,28 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+
+# Start the watchdog before importing pandas, providers or plotting libraries.
+if __name__ == "__main__" and "--_pipeline-worker" not in sys.argv:
+    from run_support import run_process
+    guard = argparse.ArgumentParser(add_help=False)
+    guard.add_argument("--total-timeout", type=float, default=1200)
+    options, _ = guard.parse_known_args()
+    try:
+        outcome = run_process([sys.executable, "-u", str(Path(__file__).resolve()), *sys.argv[1:], "--_pipeline-worker"],
+                              timeout=options.total_timeout, heartbeat=15, label="B1-B3总流程")
+    except ValueError as exc:
+        guard.error(str(exc))
+    raise SystemExit(124 if outcome["status"] == "TIMEOUT" else outcome.get("exit_code") or (0 if outcome["status"] == "PASS" else 1))
+
+from fetch_with_fallback import add_fetch_options, fetch_datasets
+from bounded_fetch import fetch_job, job
+from run_support import atomic_json, run_process
 
 import pandas as pd
 
 RESEARCH_ROOT = Path(os.environ.get("RESEARCH_ROOT", Path.cwd()))
 TODAY = datetime.now()
-
-# 通用财务/行情数据（akshare 东财接口）
-FETCH_SPECS = [
-    ("资产负债表", "资产负债表_按报告期.csv",
-     lambda ak, sym, mkt: ak.stock_balance_sheet_by_report_em(symbol=sym)),
-    ("利润表", "利润表_按报告期.csv",
-     lambda ak, sym, mkt: ak.stock_profit_sheet_by_report_em(symbol=sym)),
-    ("现金流量表", "现金流量表_按报告期.csv",
-     lambda ak, sym, mkt: ak.stock_cash_flow_sheet_by_report_em(symbol=sym)),
-    ("主要财务指标（按报告期）", "主要财务指标_按报告期.csv",
-     lambda ak, sym, mkt: ak.stock_financial_analysis_indicator_em(
-         symbol=f"{sym[-6:]}.{mkt}", indicator="按报告期")),
-    ("主要财务指标（按单季度）", "主要财务指标_按单季度.csv",
-     lambda ak, sym, mkt: ak.stock_financial_analysis_indicator_em(
-         symbol=f"{sym[-6:]}.{mkt}", indicator="按单季度")),
-    ("日线行情（不复权）", "日线股价.csv",
-     lambda ak, sym, mkt: ak.stock_zh_a_hist(
-         symbol=sym[-6:], period="daily", start_date="20000101",
-         end_date="20991231", adjust=""),
-     ("腾讯降级", lambda ak, sym, mkt: ak.stock_zh_a_hist_tx(
-         symbol=f"{mkt.lower()}{sym[-6:]}", start_date="20000101",
-         end_date="20991231", adjust=""))),
-    ("日线行情（前复权）", "日线股价_前复权.csv",
-     lambda ak, sym, mkt: ak.stock_zh_a_hist(
-         symbol=sym[-6:], period="daily", start_date="20000101",
-         end_date="20991231", adjust="qfq"),
-     ("腾讯降级", lambda ak, sym, mkt: ak.stock_zh_a_hist_tx(
-         symbol=f"{mkt.lower()}{sym[-6:]}", start_date="20000101",
-         end_date="20991231", adjust="qfq"))),
-    ("分红送配记录", "分红送配记录.csv",
-     lambda ak, sym, mkt: ak.stock_fhps_detail_em(symbol=sym[-6:])),
-    ("公司概况/现价/股本", "公司概况.csv",
-     lambda ak, sym, mkt: ak.stock_individual_info_em(symbol=sym[-6:]),
-     ("腾讯实时降级", lambda ak, sym, mkt: tencent_info(sym[-6:], mkt))),
-]
-
-
-def tencent_info(code: str, mkt: str) -> pd.DataFrame:
-    """东财公司概况降级：腾讯实时行情 -> item/value 两列（与东财概况同构）。
-
-    字段：最新价/总市值/流通市值/PE_TTM/PB/总股本（=总市值/现价估算）。
-    东财概况接口失败（限流/SSL）时使用；拉取清单记录 source 标注。
-    """
-    import re
-
-    import requests
-    url = f"https://qt.gtimg.cn/q={mkt.lower()}{code}"
-    r = requests.get(url, timeout=10)
-    r.encoding = "gbk"
-    m = re.search(r'="([^"]*)"', r.text)
-    if not m:
-        raise RuntimeError("腾讯实时行情无数据")
-    f = m.group(1).split("~")
-    if len(f) < 47:
-        raise RuntimeError(f"腾讯行情字段不足: {len(f)}")
-    price, pe, pb = float(f[3]), float(f[39]), float(f[46])
-    mktcap_yi, floatcap_yi = float(f[45]), float(f[44])
-    rows = [
-        ("总市值", mktcap_yi * 1e8),
-        ("流通市值", floatcap_yi * 1e8),
-        ("最新价", price),
-        ("市盈率(TTM)", pe),
-        ("市净率", pb),
-        ("总股本", round(mktcap_yi * 1e8 / price, 0) if price > 0 else None),
-    ]
-    return pd.DataFrame(rows, columns=["item", "value"])
-
-def tencent_info(code: str, mkt: str) -> pd.DataFrame:
-    """东财公司概况降级：腾讯实时行情 -> item/value 两列（与东财概况同构）。
-
-    字段：最新价/总市值/流通市值/PE_TTM/PB/总股本（=总市值/现价估算）。
-    东财概况接口失败（限流/SSL）时使用；拉取清单记录 source 标注。
-    """
-    import re
-
-    import requests
-    url = f"https://qt.gtimg.cn/q={mkt.lower()}{code}"
-    r = requests.get(url, timeout=10)
-    r.encoding = "gbk"
-    m = re.search(r'="([^"]*)"', r.text)
-    if not m:
-        raise RuntimeError("腾讯实时行情无数据")
-    f = m.group(1).split("~")
-    if len(f) < 47:
-        raise RuntimeError(f"腾讯行情字段不足: {len(f)}")
-    price, pe, pb = float(f[3]), float(f[39]), float(f[46])
-    mktcap_yi, floatcap_yi = float(f[45]), float(f[44])
-    rows = [
-        ("总市值", mktcap_yi * 1e8),
-        ("流通市值", floatcap_yi * 1e8),
-        ("最新价", price),
-        ("市盈率(TTM)", pe),
-        ("市净率", pb),
-        ("总股本", round(mktcap_yi * 1e8 / price, 0) if price > 0 else None),
-    ]
-    return pd.DataFrame(rows, columns=["item", "value"])
-
 
 def parse_prompt(prompt: str) -> tuple[str | None, str | None]:
     """从 "调研 温氏股份" / "调研 300498" 中解析 公司名 / 代码"""
@@ -190,8 +110,8 @@ def _tencent_quote_name(code: str, market: str) -> str | None:
 def _ak_code_name() -> pd.DataFrame | None:
     """akshare A 股代码-名称全列表（底层走交易所接口，SSL 故障时抛异常）。"""
     try:
-        import akshare as ak
-        df = ak.stock_info_a_code_name()
+        df, _ = fetch_job(job("akshare", "stock_info_a_code_name"),
+                          cache_dir=RESEARCH_ROOT / ".source_failures", timeout=30, retries=1)
         if df is not None and not df.empty and {"code", "name"}.issubset(df.columns):
             return df
     except Exception as exc:
@@ -244,24 +164,6 @@ def resolve_name(code: str) -> str | None:
     except Exception as exc:
         print(f"[解析] 腾讯实时行情查询名称失败: {exc}")
     return None
-
-
-def fetch_with_retry(name: str, fetcher: Callable, retries: int = 3,
-                     delay: float = 3.0) -> pd.DataFrame:
-    last = None
-    for attempt in range(1, retries + 1):
-        try:
-            print(f"[拉取] {name}（第 {attempt}/{retries} 次）...")
-            frame = fetcher()
-            if frame is None or frame.empty:
-                raise RuntimeError("接口返回空数据")
-            return frame
-        except Exception as exc:
-            last = exc
-            if attempt < retries:
-                print(f"[拉取] {name} 失败: {exc}；{delay:g} 秒后重试")
-                time.sleep(delay)
-    raise RuntimeError(f"连续 {retries} 次失败: {last}")
 
 
 def save_csv(frame: pd.DataFrame, path: Path) -> None:
@@ -567,6 +469,11 @@ def audit_data(data_dir: Path) -> tuple[list[dict], str]:
 
 
 def write_audit_report(data_dir: Path, checks: list[dict], status: str) -> Path:
+    # HTML is the human-facing report; JSON is the stable machine-facing audit contract.
+    (data_dir / "审计报告.json").write_text(
+        json.dumps({"audit_date": TODAY.strftime("%Y-%m-%d %H:%M"),
+                    "status": status, "checks": checks}, ensure_ascii=False, indent=2),
+        encoding="utf-8")
     rows = "".join(
         f"<tr><td>{c['name']}</td><td>{c['level']}</td><td>{c['detail']}</td></tr>"
         for c in checks)
@@ -615,10 +522,15 @@ def _guigui_scripts_dir() -> Path | None:
 
 
 TEMPLATE_SCRIPTS = [
+    "chart_periods.py", "chart_period_qc.py", "financial_history_charts.py", "chart_numbers.py",
     "verification.py", "extract_financials.py", "analyze_charts.py", "chart_qc.py",
-    "format_qc.py", "gate_all.py", "fetch_peers_financials.py", "fetch_supplement.py",
+    "format_qc.py", "gate_all.py", "run_support.py", "bounded_fetch.py", "fetch_sources.py", "fetch_peers_financials.py", "fetch_supplement.py",
     "fetch_industry_cost_price.py", "probe_sources.py", "fetch_with_fallback.py",
     "calc_penetration_return.py", "build_penetration_input.py", "sotp_valuation.py",
+    "financial_health_core.py", "financial_health_check.py", "financial_health_qc.py",
+    "report_template_qc.py", "md_to_html.py",
+    "research_topics.py", "research_topic_qc.py", "research_models.py", "capital_metrics.py",
+    "valuation_math.py", "valuation_engine.py", "valuation_snapshot.py", "config.py", "format_utils.py",
 ]
 GUIGUI_ONLY = {"calc_penetration_return.py", "build_penetration_input.py"}
 
@@ -635,27 +547,39 @@ def copy_template_scripts(batch_dir: Path) -> dict:
     dst = batch_dir / "scripts"
     dst.mkdir(parents=True, exist_ok=True)
     status: dict[str, str] = {}
+    copied: dict[str, dict[str, str]] = {}
     for fname in TEMPLATE_SCRIPTS:
         src = None
-        if fname in GUIGUI_ONLY and src_gg is not None:
+        cand = src_cr / fname
+        if cand.exists():
+            src = cand
+        elif fname in GUIGUI_ONLY and src_gg is not None:
             cand = src_gg / fname
-            if cand.exists():
-                src = cand
-        if src is None:
-            cand = src_cr / fname
             if cand.exists():
                 src = cand
         if src is None:
             status[fname] = "⚠️ 缺失（源文件不在 skill 目录）"
             continue
         try:
-            shutil.copy2(src, dst / fname)
+            if not (dst / fname).exists() or (dst / fname).read_bytes() != src.read_bytes():
+                shutil.copy2(src, dst / fname)
             status[fname] = "✅ 已复制"
+            copied[fname] = {
+                "source": str(src.resolve()),
+                "sha256": hashlib.sha256((dst / fname).read_bytes()).hexdigest(),
+            }
         except Exception as exc:
             status[fname] = f"⚠️ 复制失败（{exc}）"
     try:
-        (dst / "复制清单.json").write_text(
-            json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8")
+        manifest_path = dst / "复制清单.json"
+        try:
+            previous = json.loads(manifest_path.read_text(encoding="utf-8-sig")) if manifest_path.exists() else {}
+            if not isinstance(previous, dict):
+                previous = {}
+        except (OSError, ValueError):
+            previous = {}
+        if previous.get("files") != copied or previous.get("status") != status:
+            atomic_json(manifest_path, {"copied_at": datetime.now().astimezone().isoformat(), "status": status, "files": copied})
     except Exception as exc:
         print(f"[立项] 写复制清单失败: {exc}")
     ok = sum(1 for v in status.values() if v.startswith("✅"))
@@ -663,6 +587,35 @@ def copy_template_scripts(batch_dir: Path) -> dict:
     print(f"[立项] 模板脚本复制 {ok}/{len(TEMPLATE_SCRIPTS)} 个 -> {dst}"
           + (f"；缺失: {', '.join(miss)}" if miss else ""))
     return status
+
+
+def run_financial_health(batch_dir: Path, timeout=300) -> tuple[int, dict]:
+    """B3.5: generate the deterministic current-period financial health evidence."""
+    try:
+        script = _skill_scripts_dir() / "financial_health_check.py"
+        outcome = run_process([sys.executable, "-u", str(script), "--dir", str(batch_dir)],
+                              cwd=batch_dir, timeout=timeout, heartbeat=10, label="B3.5财报体检")
+        if outcome["status"] != "PASS":
+            return 1, {"status": "fail", "execution": outcome, "error": "本轮财报体检未完成；旧产物不计成功"}
+        json_path = batch_dir / "reports" / "本期财报体检.json"
+        md_path = batch_dir / "reports" / "本期财报体检_证据摘要.md"
+        data = json.loads(json_path.read_text(encoding="utf-8-sig"))
+        delivery_path = batch_dir / "交付清单.md"
+        if delivery_path.exists():
+            delivery_text = delivery_path.read_text(encoding="utf-8")
+            delivery_text = delivery_text.replace(
+                "| 5.5 | reports/本期财报体检.json + _证据摘要.md + _成文框架.md + 图表/体检_01~05 | B3.5 关键问题财报体检证据与成文素材，JSON 为唯一事实来源 | ⬜ B3 后自动生成 |",
+                "| 5.5 | reports/本期财报体检.json + _证据摘要.md + _成文框架.md + 图表/体检_01~05 | B3.5 关键问题财报体检证据与成文素材，JSON 为唯一事实来源 | ✅ 已生成 |",
+            ).replace(
+                "| 12 | reports/本期财报体检.json + _证据摘要.md + _成文框架.md + 图表/体检_01~05 | B3.5 关键问题财报体检证据包和固定成文素材 | ⬜ B3 后自动生成 |",
+                "| 12 | reports/本期财报体检.json + _证据摘要.md + _成文框架.md + 图表/体检_01~05 | B3.5 关键问题财报体检证据包和固定成文素材 | ✅ 已生成 |",
+            )
+            delivery_path.write_text(delivery_text, encoding="utf-8")
+        print(f"[B3.5 财报体检] 状态: {data.get('status')} ｜ JSON: {json_path.name} ｜ 摘要: {md_path.name} ｜ 成文框架/图表已生成")
+        return (0 if data.get("status") != "fail" else 1), data
+    except Exception as exc:
+        print(f"[B3.5 财报体检] FAIL: {exc}")
+        return 1, {"status": "fail", "error": str(exc)}
 
 
 def scaffold(project_dir: Path, symbol: str, code: str, name: str, status: str) -> Path:
@@ -676,6 +629,33 @@ def scaffold(project_dir: Path, symbol: str, code: str, name: str, status: str) 
     (batch_dir / "reports" / "图表").mkdir(parents=True, exist_ok=True)
     (batch_dir / "input").mkdir(exist_ok=True)
     (batch_dir / "scripts").mkdir(exist_ok=True)
+    exemption_path = batch_dir / "input" / "图表豁免.json"
+    if not exemption_path.exists():
+        exemption_path.write_text('{"豁免": []}\n', encoding="utf-8")
+    judgment_path = batch_dir / "input" / "判断记录.md"
+    if not judgment_path.exists():
+        judgment_path.write_text(
+            """# 人工判断记录
+
+本文件只记录框架规定的人工判断，不新增脚本或改变主报告结构。
+
+| 判断点 | 选择/结论 | 证据与来源日期 | 对模型/评级影响 | 复核条件 |
+|:-------|:----------|:---------------|:----------------|:---------|
+| 证券身份 | 待填 | 待填 | 待填 | 代码/名称冲突时停止 |
+| 行业适用性（成本价格/存货/特殊行业） | 待填 | 待填 | 待填 | 新财报或行业数据更新 |
+| 分部与单位经济学口径 | 待填 | 待填 | 待填 | 年报附注取得 |
+| 预测假设与三情景概率 | 待填 | 待填 | 待填 | 季报偏差超过15% |
+| 龟龟 M/AA/G/k/Rf 口径 | 待填 | 待填 | 待填 | 脚本重算或新分红 |
+| SOTP 是否触发 | 待填 | 待填 | 待填 | 分部/上市子公司变化 |
+| 最终双轨评级与仓位 | 待填 | 待填 | 待填 | R_eff 与 II 或翻转点变化 |
+""",
+            encoding="utf-8")
+    try:
+        from financial_health_core import write_default_config
+
+        write_default_config(batch_dir / "input" / "本期财报体检配置.json")
+    except Exception as exc:
+        print(f"[立项] 创建财报体检配置失败: {exc}")
 
     # B1 自动复制模板脚本（真实复制；交付清单据此如实标记，修复 2026-08-21 假"已复制"）
     _script_status = copy_template_scripts(batch_dir)
@@ -714,12 +694,12 @@ def scaffold(project_dir: Path, symbol: str, code: str, name: str, status: str) 
 ├── 财报更新验证.md   # ★ 跨批次汇总（根目录，每次分析一行；本批次完成后追加）
 ├── <YYYY_MM_DD>/     # 本批次（文件夹名=本次分析的实际日期，本批次 {TODAY:%Y_%m_%d}）
 │   ├── README.md     # 本文件：总览 + 交付状态
-│   ├── ROADMAP.md    # B4-B6 八步分析路线图
+│   ├── ROADMAP.md    # B3.5-B6 分析路线图
 │   ├── 交付清单.md    # ★ 交付物清单（B6 交付前逐项核对）
-│   ├── data/         # 原始数据：拉取清单.json / 审计报告.html / *.csv
-│   ├── input/        # 模型输入：穿透回报率_输入.json（guigui --config）
-│   ├── scripts/      # 复验与图表脚本：verification.py / calc_penetration_return.py / analyze_*.py
-│   └── reports/      # 交付报告：主报告 / 图表/ / 穿透回报率_输出.json / 跟踪验证台账.md
+        │   ├── data/         # 原始数据：拉取清单.json / 审计报告.html+json / *.csv
+│   ├── input/        # 模型输入：穿透回报率_输入.json / 本期财报体检配置.json（行业与关键问题口径）
+│   ├── scripts/      # 复验、图表、B3.5 体检和门控脚本
+│   └── reports/      # 主报告 / 体检 JSON+摘要 / 图表/ / 估值输出 / 跟踪台账
 └── <YYYY_MM_DD>/     # 下一批次（新财报后重新分析，旧批次只读保留）
 ```
 
@@ -728,6 +708,7 @@ def scaffold(project_dir: Path, symbol: str, code: str, name: str, status: str) 
 | 步骤 | 内容 | 状态 |
 |------|------|------|
 | 0 | 数据拉取与审计 | ✅ 自动完成（见批次内 data/审计报告.html） |
+| 0.5 | 本期财报体检（B3.5） | ✅ 自动生成（见 reports/本期财报体检 JSON、证据摘要、成文框架与五张固定图） |
 | 1 | 宏观经济评述 | ⬜ 待分析 |
 | 2 | 行业分析 | ⬜ 待分析 |
 | 3 | 公司分析 | ⬜ 待分析 |
@@ -742,17 +723,19 @@ def scaffold(project_dir: Path, symbol: str, code: str, name: str, status: str) 
 - 每次交付必须按批次内 `交付清单.md` 逐项核对后输出，缺失项须说明原因；
 - 分析完成后在根目录 `财报更新验证.md` 追加一行（当前股价 / 12M 三情景 / 财报要点 / 评级）。
 """
-    (batch_dir / "README.md").write_text(readme, encoding="utf-8")
+    if not (batch_dir / "README.md").exists():
+        (batch_dir / "README.md").write_text(readme, encoding="utf-8")
 
     roadmap = """# 分析路线图
 
-按 company-research 技能 `references/framework.md` B4-B6 执行：
+按 company-research 技能 `references/framework.md` B3.5-B6 执行：
 
-1. 宏观 → 2. 行业 → 3. 公司 → 4. 财务 → 5. 预测 → 6. 估值 → 7. 建议 → 8. 报告
+0.5. 本期财报体检（关键问题证据包） → 1. 宏观 → 2. 行业 → 3. 公司 → 4. 财务（含 §4.3） → 5. 预测 → 6. 估值 → 7. 建议 → 8. 报告
 
 每个核心论点 ≥ L4 证据；成稿前过 E 节质量审计清单。
 """
-    (batch_dir / "ROADMAP.md").write_text(roadmap, encoding="utf-8")
+    if not (batch_dir / "ROADMAP.md").exists():
+        (batch_dir / "ROADMAP.md").write_text(roadmap, encoding="utf-8")
 
     # 交付清单（B1 建骨架，B4-B6 逐步填写，B6 交付前逐项核对）
     delivery = f"""# 交付清单 — {name}（{symbol}）｜ 批次 {TODAY:%Y_%m_%d}
@@ -761,7 +744,7 @@ def scaffold(project_dir: Path, symbol: str, code: str, name: str, status: str) 
 > 规则：每次交付必须按本清单逐项核对；B4-B6 完成前，第二、三节不得勾选。
 > 位置：本清单与 data/input/scripts/reports 均在批次文件夹 `{TODAY:%Y_%m_%d}/` 内；根目录 `财报更新验证.md` 为跨批次汇总。
 
-## 一、B1-B3 自动生成（数据层，由 research_pipeline.py 完成）
+## 一、B1-B3.5 自动生成（数据层，由 research_pipeline.py 完成）
 
 | # | 交付物 | 说明 | 状态 |
 |---|--------|------|------|
@@ -769,19 +752,21 @@ def scaffold(project_dir: Path, symbol: str, code: str, name: str, status: str) 
 | 2 | ROADMAP.md | B4-B6 八步路线图 | ✅ 骨架已建 |
 | 3 | 根目录 财报更新验证.md | 跨批次汇总表头（B1 创建；本批次完成时追加一行） | ✅ 表头已建 |
 | 4 | data/拉取清单.json | B2 各接口拉取记录（成功/失败/行数） | ✅ 已生成 |
-| 5 | data/审计报告.html | B3 数据审计与门控结果 | ✅ 已生成 |
+| 5 | data/审计报告.html + 审计报告.json | B3 人读审计报告与机器审计契约 | ✅ 已生成 |
+| 5.5 | reports/本期财报体检.json + _证据摘要.md + _成文框架.md + 图表/体检_01~05 | B3.5 关键问题财报体检证据与成文素材，JSON 为唯一事实来源 | ⬜ B3 后自动生成 |
 | 6 | data/*.csv | 三表/财务指标/日线/分红/概况原始数据 | ⬜ 逐项核对 |
 | 7 | scripts/verification.py | 复验助手（自动复制） | {st_verify} |
 | 8 | scripts/calc_penetration_return.py | 穿透回报率计算器（guigui，自动复制） | {st_pen} |
-| 10 | scripts/ 模板脚本集 | analyze_charts/chart_qc/format_qc/extract_financials/fetch_peers/fetch_supplement/probe_sources/fetch_with_fallback/build_penetration_input/gate_all 等（自动复制） | {st_tpl} |
+| 10 | scripts/ 模板脚本集 | analyze_charts/chart_qc/format_qc/extract_financials/fetch_peers/fetch_supplement/probe_sources/fetch_with_fallback/build_penetration_input/md_to_html/gate_all 等（自动复制） | {st_tpl} |
+| 11 | input/本期财报体检配置.json | B3.5 规则、阈值和数据源配置 | ✅ 已生成 |
 | 9 | 行业成本—价格数据（行业适用） | data/行业成本价格.csv + 行业成本价格_审计.json + input/行业成本价格配置.json（B2.2，fetch_industry_cost_price.py --profile dairy 生成；乳制品等成本驱动行业必做） | ⬜ 行业不适用时填"不适用" |
 
 ## 二、B4-B6 分析交付（Agent 负责，缺一不可）
 
 | # | 交付物 | 说明 | 状态 |
 |---|--------|------|------|
-| 1 | 主报告 MD | reports/{name}_{code}_分析报告.md（D1 十部分或龟龟 11 章） | ⬜ |
-| 2 | 主报告 HTML | reports/{name}_{code}_分析报告.html | ⬜ |
+| 1 | 主报告 MD | reports/{name}_{code}_分析报告.md（references/report-template.md v3 固定十部分） | ⬜ |
+| 2 | 主报告 HTML | reports/{name}_{code}_分析报告.html（由 scripts/md_to_html.py 从 MD 生成） | ⬜ |
 | 3 | 交互图表 HTML | reports/{name}_{code}_图表.html | ⬜ |
 | 4 | 图表 PNG | reports/图表/图NN_*.png（≥10 张） | ⬜ |
 | 5 | 穿透回报率输入 | input/穿透回报率_输入.json | ⬜ |
@@ -796,8 +781,10 @@ def scaffold(project_dir: Path, symbol: str, code: str, name: str, status: str) 
 
 - [ ] E 节《成稿前质量审计清单》全部通过（framework.md）
 - [ ] 穿透回报率脚本已运行，输出与报告数字一致（G7）
+- [ ] B3.5 本期财报体检：关键问题 JSON、证据摘要、成文框架和五张固定图已生成；§4.3 已引用 JSON 并嵌图，现金流/利润/适用专项结论及 WARN/indeterminate 已用人类可读方式披露（G22）
 - [ ] 图表 ≥10 张，每张有编号/标题/数据日期/来源（analyze_charts --data-date 自动标注），正文有解读
 - [ ] 图表质量门（G8）：`python scripts/chart_qc.py --dir . --report reports/<报告>.md` 已运行且无 FAIL；WARN 项已在本清单说明
+- [ ] 报告模板门：`python scripts/report_template_qc.py --report reports/<报告>.md` 已运行且无 FAIL；十部分、固定财务子节、每节结论和数据依据齐全
 - [ ] 行业成本—价格门控（G8-INDUSTRY，行业适用）：data/行业成本价格.csv 审计通过、cost+price 双序列、≥2 独立来源，图16 已嵌入 §2 宏观与行业并解读传导；行业不适用已说明
 - [ ] SOTP 门（平台型触发时）：sotp_valuation.py 已运行，reports/sotp_输出.json 存在，图18 已嵌入 §6 并引用结论；非平台型已说明跳过
 - [ ] 格式质量门（G9）：`python scripts/format_qc.py --dir . --report reports/<报告>.md` 已运行且无 FAIL（F1-F11：`---##` 同行粘连/分隔线缺空行/setext 歧义/表格列数/图片引用/连续空行/行尾空白/标记闭合/换行符/BOM）；WARN 项已在本清单说明
@@ -806,7 +793,8 @@ def scaffold(project_dir: Path, symbol: str, code: str, name: str, status: str) 
 - [ ] 根目录 财报更新验证.md 已追加本批次一行（紧贴表格分隔行，禁止空行，否则表格断裂）
 - [ ] 对话交付时按本清单输出（含缺失项说明）
 """
-    (batch_dir / "交付清单.md").write_text(delivery, encoding="utf-8")
+    if not (batch_dir / "交付清单.md").exists():
+        (batch_dir / "交付清单.md").write_text(delivery, encoding="utf-8")
     print(f"[立项] 批次已创建: {batch_dir}")
     return batch_dir
 
@@ -818,8 +806,15 @@ def main() -> int:
     parser.add_argument("--data-dir", help="对已有数据目录只做审计（跳过拉取）")
     parser.add_argument("--audit-only", action="store_true", help="配合 --data-dir 使用")
     parser.add_argument("--root", help="项目创建根目录（默认当前工作目录）")
-    parser.add_argument("--retries", type=int, default=3)
+    parser.add_argument("--sync-scripts", help="只将当前技能脚本同步到指定批次，不拉数、不重置文档")
+    parser.add_argument("--total-timeout", type=float, default=1200, help="B1-B3全流程硬超时秒数")
+    parser.add_argument("--stage-timeout", type=float, default=300, help="财报体检/期间证据阶段硬超时")
+    parser.add_argument("--_pipeline-worker", action="store_true", help=argparse.SUPPRESS)
+    add_fetch_options(parser)
     args = parser.parse_args()
+    if args.sync_scripts:
+        statuses = copy_template_scripts(Path(args.sync_scripts).resolve())
+        return int(any(not s.startswith("✅") for s in statuses.values()))
 
     # B1 解析
     company, code = args.company, args.code
@@ -831,7 +826,12 @@ def main() -> int:
         checks, status = audit_data(data_dir)
         report = write_audit_report(data_dir, checks, status)
         print(f"\n[审计] 门控: {status} ｜ 报告: {report}")
-        return 0
+        health_exit, health_data = run_financial_health(data_dir.parent, args.stage_timeout)
+        period_result = run_process([sys.executable, "-u", str(_skill_scripts_dir()/"chart_periods.py"), "--dir", str(data_dir.parent)],
+                                    timeout=args.stage_timeout, heartbeat=10, label="B3.6期间证据")
+        if health_data.get("status") == "fail":
+            print("[B3.5 财报体检] 门控失败：请补齐三表或可比期间后重跑。")
+        return 1 if status == "fail" or health_exit or period_result["status"] != "PASS" else 0
 
     if not code and company:
         print(f"[解析] 用名称解析代码: {company}")
@@ -857,68 +857,31 @@ def main() -> int:
     print(f"[立项] {symbol} {company} -> {project_dir}")
     batch_dir = scaffold(project_dir, symbol, code, company, "数据就绪/待分析")
 
-    # B2 拉取
-    try:
-        import akshare as ak
-    except ImportError:
-        print("❌ 缺少 akshare，请先: python -m pip install -U akshare pandas")
-        return 1
-
-    em_symbol = f"{market}{code}"
-    results = []
-    for spec in FETCH_SPECS:
-        name, fname, fetcher = spec[0], spec[1], spec[2]
-        fallbacks = spec[3] if len(spec) > 3 else ()
-        # 归一化：单个 (名称, fetcher) 元组 -> 列表（修复 2026-08-18 日线腾讯降级 unpack 崩溃）
-        if fallbacks and isinstance(fallbacks, tuple) and len(fallbacks) == 2 and callable(fallbacks[1]):
-            fallbacks = [fallbacks]
-        out = batch_dir / "data" / fname
-        frame = None
-        used = name
-        last_err = None
-        try:
-            frame = fetch_with_retry(name, lambda f=fetcher: f(ak, em_symbol, market),
-                                     args.retries)
-        except Exception as exc:
-            last_err = exc
-            for fb_name, fb in fallbacks:
-                try:
-                    frame = fetch_with_retry(f"{name}（{fb_name}）",
-                                             lambda f=fb: f(ak, em_symbol, market),
-                                             args.retries)
-                    used = f"{name}（{fb_name}）"
-                    break
-                except Exception as fb_exc:
-                    last_err = fb_exc
-        if frame is not None:
-            save_csv(frame, out)
-            results.append({"name": name, "file": fname, "status": "success",
-                            "source": used, "rows": len(frame),
-                            "columns": len(frame.columns)})
-            print(f"[拉取] {used}: {len(frame)} 行 -> {out.name}")
-        else:
-            results.append({"name": name, "file": fname, "status": "failed",
-                            "error": str(last_err)})
-            print(f"[拉取] {name}: 失败 - {last_err}")
-
-    manifest = {
-        "stock": {"symbol": symbol, "code": code, "name": company},
-        "akshare_version": getattr(ak, "__version__", "unknown"),
-        "started_at": TODAY.isoformat(timespec="seconds"),
-        "output_directory": str(batch_dir / "data"),
-        "datasets": results,
-    }
-    (batch_dir / "data" / "拉取清单.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+    # B2: same bounded source adapter as the standalone fetch command.
+    manifest = fetch_datasets(code, market, batch_dir / "data", timeout=args.timeout,
+                              retries=args.retries, failure_ttl=args.failure_ttl, force=args.force_refresh,
+                              total_budget=args.fetch_budget, success_ttl=args.success_ttl)
 
     # B3 审计
     checks, status = audit_data(batch_dir / "data")
+    if manifest["status"] != "PASS":
+        checks.append({"name":"本轮拉取缺失", "level":"⚠️", "detail":"见拉取清单；保留旧文件不等于本轮更新成功"})
+        if status == "pass":
+            status = "warn"
     report = write_audit_report(batch_dir / "data", checks, status)
     print(f"\n[审计] 门控: {status} ｜ 报告: {report}")
+
+    # B3.5 本期财报体检证据层：无论 B3 是否有 WARN，都必须生成；硬失败阻断后续交付。
+    health_exit, health_data = run_financial_health(batch_dir, args.stage_timeout)
+
+    # Build latest-period chart evidence before B4. Never rely on FY-only ops inputs.
+    period_result = run_process([sys.executable, "-u", str(_skill_scripts_dir()/"chart_periods.py"), "--dir", str(batch_dir)],
+                                timeout=args.stage_timeout, heartbeat=10, label="B3.6期间证据")
 
     # 交接给 Agent
     print("\n" + "=" * 60)
     print("下一步（Agent 按 references/framework.md 继续）：")
+    print("  B3.5 本期财报体检：阅读关键问题 JSON/证据摘要，优先复制 reports/本期财报体检_成文框架.md 写入 §4.3")
     print("  B4 八步分析：宏观→行业→公司→财务→预测→估值→建议→报告")
     print("  B5 交叉验证：同行对标≥5家、敏感性翻转点、尾部情景")
     print("  B6 结论：评级 + 12个月目标价 + 推导链 + 成稿审计清单")
@@ -926,7 +889,7 @@ def main() -> int:
     if status != "pass":
         print(f"\n⚠️ 审计门控为 {status}，分析时必须标注数据局限。")
     print("=" * 60)
-    return 0 if status != "fail" else 1
+    return 0 if status != "fail" and health_exit == 0 and period_result["status"] == "PASS" else 1
 
 
 if __name__ == "__main__":

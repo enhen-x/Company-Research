@@ -202,7 +202,10 @@ Task(
   定性参数提取：从 qualitative_report.md 末尾 "结构化参数" 表读取，
   按 {strategy_dir}/references/factor_interface.md 的值域映射规则转换。
 
-  将最终报告写入：{output_dir}/{company}_{code}_分析报告.md
+  先读取 references/report-template.md v3，并将最终报告写入：
+  {output_dir}/{company}_{code}_分析报告.md
+  主报告只能使用十部分固定结构；每章必须有数据依据和本节结论，
+  第4章必须有 §4.1-§4.4。完成后运行 scripts/report_template_qc.py。
   """,
   description = "Phase3 Agent C 估值与报告"
 )

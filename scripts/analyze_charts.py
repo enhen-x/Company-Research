@@ -32,7 +32,8 @@
               # 年份+营收总额放环心，禁止子图 set_title——会与顶部图例重叠；<3.5% 小分段不标百分比）。
   "profitability": {"标题":"图04 ...","labels":[...], "毛利率":[...], "净利率":[...], "ROE":[...]},
   "cashflow": {"标题":"图05 ...","labels":[...], "OCF":[...], "Capex":[...], "FCF":[...], "D_A":[...]},
-  "peers": [{"公司":"A","PE":20,"PB":3,"ROE":15,"营收增速":10,"净利增速":12,"净利率":18,"高亮":true}],
+  "target": {"公司":"标的公司","代码":"000000"},
+  "peers": [{"公司":"标的公司","代码":"000000","PE":20,"PB":3,"ROE":15,"营收增速":10,"净利增速":12,"净利率":18,"标的":true}],
   "targets": {"labels":["当前价","PE基准",...], "values":[100,150,...], "注":"说明"},
   "penetration": {"labels":["情景A","情景B"], "gg":[2.5,4.2], "ii":3.70, "注":"说明"},
   "sensitivity": {"xlabel":"...","ylabel":"...","x":[0.7,0.8,1.0,1.1,1.2],
@@ -62,7 +63,14 @@
 from __future__ import annotations
 
 import argparse, json, math, re, sys
+import textwrap
+import functools
+import hashlib
 from pathlib import Path
+from chart_numbers import format_number
+
+from chart_periods import (build_period_pack, refresh_period_pack, extend_chart_input, record_integrated_figure,
+                          CHART_METRICS, NAMES, RATIOS, STOCKS)
 
 import matplotlib
 matplotlib.use("Agg")
@@ -75,10 +83,39 @@ plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "Arial Unicode M
 plt.rcParams["axes.unicode_minus"] = False
 
 SRC = "数据：东财/公司公告/行情源 ｜ 生成日以数据日期为准"
+LATEST_PACK = {}
+
+
+def configure_latest(data_dir: Path, write: bool = False):
+    global LATEST_PACK
+    LATEST_PACK = (refresh_period_pack if write else build_period_pack)(Path(data_dir).parent)
+    return LATEST_PACK
+
+
+def latest_chart(chart_id):
+    def decorate(fn):
+        @functools.wraps(fn)
+        def wrapped(*args, **kwargs):
+            if LATEST_PACK.get('has_interim_income'):
+                from financial_history_charts import fig_history
+                ops = args[0] if args and isinstance(args[0],dict) else None
+                return fig_history(LATEST_PACK,chart_id,ops)
+            if args and LATEST_PACK.get('basis') == 'YTD':
+                args = (extend_chart_input(args[0], chart_id, LATEST_PACK), *args[1:])
+            return record_integrated_figure(fn(*args, **kwargs), chart_id, LATEST_PACK)
+        return wrapped
+    return decorate
 
 # ─── helpers ───────────────────────────────────────────────
 def p(msg: str) -> None:
     print(msg, flush=True)
+
+
+def _section_title(raw: object, default: str, section: str) -> str:
+    """Normalize a data-supplied title and append its report section once."""
+    title = str(raw or default).strip()
+    title = re.split(r"\s*→\s*§", title, maxsplit=1)[0].rstrip()
+    return f"{title} → {section}"
 
 def load_csv(data_dir: Path, name: str) -> pd.DataFrame | None:
     f = data_dir / name
@@ -94,10 +131,13 @@ def load_csv(data_dir: Path, name: str) -> pd.DataFrame | None:
             return None
 
 def save(fig, out_dir: Path, name: str) -> None:
-    fig.tight_layout()
+    _layout_legend_top(fig)
+    if not getattr(fig,'_year_grouped',False):
+        fig.tight_layout(rect=(0, 0, 1, .84) if getattr(fig, '_legend_top', False) else None)
     _auto_fix_layout(fig)   # G8-RENDER 自适应（2026-08-18）：标注越界/图例遮挡/双轴标注距离/刻度
     _auto_height(fig)       # G8-RENDER 高度自适应（2026-08-18）：axes 被轴外元素压缩时手动拉满
-    fig.savefig(out_dir / name, dpi=150, bbox_inches="tight")
+    fig.savefig(out_dir / name, dpi=150, bbox_inches="tight",
+                bbox_extra_artists=[t for t in fig.texts if t.get_visible()]+list(fig.legends))
     plt.close(fig)
     p(f"[OK] {name}")
 
@@ -106,6 +146,8 @@ def _auto_height(fig, min_ratio: float = 0.65):
     """G8-RENDER 高度自适应（2026-08-18，图15 校准）：tight_layout 后若单图
     （含 twinx，≤2 个 axes）的 axes 高度占比 < min_ratio（被轴外脚注/图例挤压），
     手动把主 axes 拉满 figure（bottom=0.10, top=0.88），避免图高只占 3/5。"""
+    if getattr(fig, '_legend_top', False) or getattr(fig, '_measured_native_layout', False):
+        return False  # reserved title/legend rows are intentional, not squeezed axes
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
     fh = fig.bbox.height
@@ -146,7 +188,9 @@ def _fix_xtick_overlap(fig) -> None:
             continue
         if len(idx) > 12:
             step = max(1, math.ceil(len(idx) / 10))
-            keep = idx[::step]
+            # Always retain the newest observation and both latest-period labels.
+            latest_year=str(getattr(fig,'_latest_period',''))[:4]
+            keep = sorted(set(idx[::step] + [idx[-1]] + [i for i in idx if '实际' in labels[i].get_text() or '基期' in labels[i].get_text() or (latest_year and labels[i].get_text()==latest_year)]))
             ax.set_xticks([positions[i] for i in keep])
             ax.set_xticklabels([labels[i].get_text() for i in keep])
             labels = list(ax.get_xticklabels())
@@ -340,6 +384,65 @@ def _text_bbox_overlap(a, b) -> bool:
     iy = min(a.y1, b.y1) - max(a.y0, b.y0)
     return ix > 0 and iy > 0
 
+def _layout_legend_top(fig):
+    """One horizontal legend row above the original axes, never a wide right gutter."""
+    if getattr(fig, '_legend_top', False) or len(fig.axes) > 2:
+        return
+    legends = [ax.get_legend() for ax in fig.axes if ax.get_legend() is not None] + list(fig.legends)
+    if not legends:
+        return
+    handles, labels = [], []
+    for ax in fig.axes:
+        hh, ll = ax.get_legend_handles_labels()
+        for h, lab in zip(hh, ll):
+            if lab not in labels and not lab.startswith('_'):
+                handles.append(h); labels.append(lab)
+    if not handles:
+        return
+    for legend in legends:
+        legend.remove()
+    title = fig.axes[0].get_title()
+    if title:
+        fig.axes[0].set_title('')
+        fig.suptitle(title, fontsize=13, fontweight='bold', y=.99)
+    fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(.5,.94),
+               ncol=min(4,len(labels)), frameon=False, fontsize=9,
+               columnspacing=1.5, handlelength=2)
+    fig.subplots_adjust(left=.10, right=.92, bottom=.23, top=.80)
+    fig._legend_top = True
+
+
+def _resolve_value_collisions(fig):
+    """Resolve value/name/comment collisions in their own coordinate systems."""
+    fig.canvas.draw()
+    for ax in fig.axes:
+        texts=[t for t in ax.texts if t.get_visible() and t.get_text().strip()]
+        for _ in range(8):
+            renderer=fig.canvas.get_renderer(); moved=False
+            for i,first in enumerate(texts):
+                for second in texts[i+1:]:
+                    a,b=first.get_window_extent(renderer),second.get_window_extent(renderer)
+                    if not _text_bbox_overlap(a,b):
+                        continue
+                    chosen=first if a.y0>=b.y0 else second
+                    bb=chosen.get_window_extent(renderer)
+                    other=b if chosen is first else a
+                    bounds=ax.get_window_extent(renderer)
+                    shift=other.y1-bb.y0+4
+                    if bb.y1+shift>bounds.y1-2:
+                        shift=other.y0-bb.y1-4
+                    if bb.y0+shift<bounds.y0+2:
+                        continue
+                    transform=chosen.get_transform()
+                    px=transform.transform(chosen.get_position())
+                    chosen.set_position(transform.inverted().transform((px[0],px[1]+shift)))
+                    fig.canvas.draw(); renderer=fig.canvas.get_renderer()
+                    moved=True
+            if not moved:
+                break
+            fig.canvas.draw()
+
+
 def _auto_fix_layout(fig, max_tries: int = 4):
     """G8-RENDER 自适应绘制后处理（2026-08-18）：在 save() 前调用。
 
@@ -349,12 +452,22 @@ def _auto_fix_layout(fig, max_tries: int = 4):
        LEGEND_OVERLAP_RATIO → 移到轴外右上（bbox_to_anchor=(1.02,1.0)）；
        ④ 刻度重合 → 复用 _fix_xtick_overlap。返回 fig（幂等，可重复调用）。
     """
+    if getattr(fig, '_year_grouped', False):
+        from financial_history_charts import layout_history
+        layout_history(fig)
+        return fig
+    _layout_legend_top(fig)
     _fix_xtick_overlap(fig)
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
     for ax in fig.axes:
         # ① 标注越界 → 扩展坐标范围（全部 transData 文本，防标题/门槛/脚注被裁剪）
         for t in ax.texts:
+            # pie() creates empty category labels beyond the outer radius.
+            # Empty/invisible labels must not expand limits and displace the
+            # percentage labels already anchored in axes coordinates.
+            if not t.get_visible() or not t.get_text().strip():
+                continue
             try:
                 if t.get_transform() != ax.transData:
                     continue
@@ -423,6 +536,9 @@ def _auto_fix_layout(fig, max_tries: int = 4):
                 leg.set_loc("upper left")
                 fig.canvas.draw()
                 renderer = fig.canvas.get_renderer()
+    _resolve_value_collisions(fig)
+    from financial_history_charts import layout_native
+    layout_native(fig)
     return fig
 
 
@@ -434,15 +550,16 @@ def _date(df: pd.DataFrame) -> str | None:
 
 # ═══════════════ 图01-02：CSV自动（无需ops） ═══════════════
 
+@latest_chart("图01")
 def fig_revenue(pl_y: pd.DataFrame) -> plt.Figure | None:
-    pl_y = pl_y.tail(12)
+    pl_y = pl_y if '_chart_label' in pl_y else pl_y.tail(12)
     rev_col = _col(pl_y, "OPERATE_INCOME", "营业总收入")
     np_col = _col(pl_y, "PARENT_NETPROFIT", "归母净利")
     if not rev_col:
         return None
     rev = [e8(r.get(rev_col)) for _, r in pl_y.iterrows()]
     np_ = [e8(r.get(np_col)) for _, r in pl_y.iterrows()] if np_col else []
-    labels = [r["REPORT_DATE"].strftime("%Y") for _, r in pl_y.iterrows()]
+    labels = [r.get('_chart_label', r["REPORT_DATE"].strftime("%Y")) for _, r in pl_y.iterrows()]
     rev = [v if v is not None else np.nan for v in rev]
     np_ = [v if v is not None else np.nan for v in np_]
     fig, ax1 = plt.subplots(figsize=(10, 5.5))
@@ -451,7 +568,7 @@ def fig_revenue(pl_y: pd.DataFrame) -> plt.Figure | None:
     for i, v in enumerate(rev):
         if np.isnan(v):
             continue
-        ax1.text(i, v + np.nanmax(rev)*0.012, f"{v:,.0f}", ha="center", fontsize=8.5, color="#4C72B0")
+        ax1.text(i, v + np.nanmax(rev)*0.012, f"{format_number(v)}", ha="center", fontsize=8.5, color="#4C72B0")
     ax2 = ax1.twinx()
     if np_:
         ax2.plot(labels, np_, marker="o", color="#C44E52", lw=2.5, markersize=7, label="归母净利（亿元）")
@@ -459,8 +576,8 @@ def fig_revenue(pl_y: pd.DataFrame) -> plt.Figure | None:
         for i, v in enumerate(np_):
             if np.isnan(v):
                 continue
-            ax2.text(i, v + np.nanmax(np_)*0.025, f"{v:,.1f}", ha="center", fontsize=8.5, color="#C44E52")
-    ax1.set_title("图01 营业总收入与归母净利（年报口径） → §4 财务分析", fontsize=13, fontweight="bold")
+            ax2.text(i, v + np.nanmax(np_)*0.025, f"{format_number(v)}", ha="center", fontsize=8.5, color="#C44E52")
+    ax1.set_title("图01 营业总收入与归母净利（历史及最新实际） → §4 财务分析", fontsize=13, fontweight="bold")
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=9)
@@ -468,11 +585,12 @@ def fig_revenue(pl_y: pd.DataFrame) -> plt.Figure | None:
     return fig
 
 
+@latest_chart("图02")
 def fig_roe_bps(fi_y: pd.DataFrame) -> plt.Figure | None:
-    fi_y = fi_y.tail(12)
+    fi_y = fi_y if '_chart_label' in fi_y else fi_y.tail(12)
     if not fi_y.columns.intersection(["ROEJQ", "ROE", "BPS"]).size:
         return None
-    labels = [r["REPORT_DATE"].strftime("%Y") for _, r in fi_y.iterrows()]
+    labels = [r.get('_chart_label', r["REPORT_DATE"].strftime("%Y")) for _, r in fi_y.iterrows()]
     roe_col = _col(fi_y, "ROEJQ", "ROE")
     bps_col = _col(fi_y, "BPS")
     roe_vals = [num(r.get(roe_col)) for _, r in fi_y.iterrows()] if roe_col else []
@@ -485,12 +603,12 @@ def fig_roe_bps(fi_y: pd.DataFrame) -> plt.Figure | None:
         ax1.set_ylabel("ROE（%）", color="#55A868", fontsize=11)
         for i, v in enumerate(roe_vals):
             if not np.isnan(v):
-                ax1.text(i, v + _dy(roe_vals), f"{v:.1f}%", ha="center", fontsize=9, color="#55A868")
+                ax1.text(i, v + _dy(roe_vals), f"{format_number(v)}%", ha="center", fontsize=9, color="#55A868")
     ax2 = ax1.twinx()
     if bps_vals:
         ax2.plot(labels, bps_vals, marker="s", color="#4C72B0", lw=2.5, markersize=7, label="BPS（元）")
         ax2.set_ylabel("BPS（元）", color="#4C72B0", fontsize=11)
-    ax1.set_title("图02 ROE 与每股净资产（年报口径） → §4 财务分析", fontsize=13, fontweight="bold")
+    ax1.set_title("图02 ROE 与每股净资产（历史及最新实际） → §4 财务分析", fontsize=13, fontweight="bold")
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=9)
@@ -522,19 +640,28 @@ def fig_segment(ops: dict) -> plt.Figure | None:
     colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8B5CF6", "#F59E0B", "#7F7F7F"]
     names = [s["name"] for s in series]
     n = len(labels)
-    fig, axes = plt.subplots(1, n, figsize=(5.6 * n, 5.6))
-    if n == 1:
-        axes = [axes]
+    rows = 2 if n > 3 else 1
+    cols = math.ceil(n / rows)
+    fig, axes = plt.subplots(rows, cols, figsize=(5.6 * cols, 5.6 * rows))
+    axes = np.atleast_1d(axes).ravel()
+    for ax in axes[n:]:
+        ax.set_visible(False)
     handles = None
     for i, lab in enumerate(labels):
         vals = [float(series[k]["values"][i]) for k in range(len(series))]
         total = sum(vals)
-        wedges, _, autotexts = axes[i].pie(
+        wedges, categorytexts, autotexts = axes[i].pie(
             vals, colors=colors, startangle=90, counterclock=False,
-            autopct=lambda pv: (f"{pv:.1f}%" if pv >= 3.5 else ""),
+            autopct=lambda pv: (f"{format_number(pv)}%" if pv >= 3.5 else ""),
             pctdistance=0.80,
             wedgeprops=dict(width=0.42, edgecolor="white", linewidth=1.5),
             textprops=dict(fontsize=8))
+        for label in [*categorytexts, *autotexts]:
+            if not label.get_text().strip():
+                label.remove()
+        radius=max(w.r for w in wedges)
+        axes[i].set_xlim(-1.03*radius,1.03*radius)
+        axes[i].set_ylim(-1.03*radius,1.03*radius)
         for at in autotexts:
             if at.get_text():
                 at.set_color("white")
@@ -548,13 +675,13 @@ def fig_segment(ops: dict) -> plt.Figure | None:
                 at.set_position((xf, yf))
                 at.set_transform(axes[i].transAxes)
         # 年份+营收放环形图中心（原 set_title 位于 axes 上方，会与顶部图例重叠）
-        axes[i].text(0.5, 0.5, f"{lab}\n{total:,.0f} 亿", ha="center", va="center",
+        axes[i].text(0.5, 0.5, f"{lab}\n{format_number(total)} 亿", ha="center", va="center",
                      transform=axes[i].transAxes, fontsize=11.5, fontweight="bold", color="#333333")
         axes[i].set_aspect("equal")
         if handles is None:
             handles = wedges
     # 三段式布局：图题(最上) → 图例(其下) → 环形图(再下)，避免图例与图题重叠
-    fig.suptitle(d.get("标题", "图03 分部营收构成") + " → §3 公司分析",
+    fig.suptitle(_section_title(d.get("标题"), "图03 分部营收构成", "§3 公司分析"),
                  fontsize=13, fontweight="bold", y=0.985)
     fig.legend(handles, names, loc="upper center", bbox_to_anchor=(0.5, 0.915),
                ncol=len(names), fontsize=9, frameon=False,
@@ -696,7 +823,7 @@ def fig_industry_cost_price(ops: dict, data_dir: Path) -> plt.Figure | None:
     ax1.set_ylabel("成本（原始值）", fontsize=10)
     if ax_price is not None:
         ax_price.set_ylabel("价格 / 价差（原始值）", fontsize=10)
-    ax1.set_title(d.get("标题", "图16 行业成本与价格走势与供需 → §2 宏观与行业"),
+    ax1.set_title(_section_title(d.get("标题"), "图16 行业成本与价格走势与供需", "§2 宏观与行业"),
                   fontsize=13, fontweight="bold")
     srcs = sorted({str(s.get("source", "")).strip() for s in d["series"] if s.get("source")})
     src_txt = "、".join(srcs) if srcs else SRC
@@ -761,6 +888,7 @@ def _pick_even_ticks(all_dt, max_ticks: int = 8):
         picked = [picked[i] for i in idx]
     return picked
 
+@latest_chart("图04")
 def fig_profitability(ops: dict) -> plt.Figure | None:
     d = ops.get("profitability")
     if not d:
@@ -768,22 +896,31 @@ def fig_profitability(ops: dict) -> plt.Figure | None:
     labels = d["labels"]
     fig, ax1 = plt.subplots(figsize=(10, 5.5))
     x = range(len(labels))
-    ax1.plot(x, d["毛利率"], marker="o", color="#4C72B0", lw=2.5, markersize=7, label="毛利率（%）")
-    ax1.plot(x, d["净利率"], marker="s", color="#55A868", lw=2.5, markersize=7, label="净利率（%）")
+    gross_label = d.get("毛利率名称", "毛利率（%）")
+    net_label = d.get("净利率名称", "净利率（%）")
+    profit_series = [d["毛利率"], d["净利率"]]
+    ax1.plot(x, d["毛利率"], marker="o", color="#4C72B0", lw=2.5, markersize=7, label=gross_label)
+    ax1.plot(x, d["净利率"], marker="s", color="#55A868", lw=2.5, markersize=7, label=net_label)
     for i, v in enumerate(d["毛利率"]):
-        ax1.text(i, v + 0.4, f"{v:.1f}%", ha="center", fontsize=8.5, color="#4C72B0")
+        if v is not None and np.isfinite(v):
+            ax1.text(i, v + 0.4, f"{format_number(v)}%", ha="center", fontsize=8.5, color="#4C72B0")
     for i, v in enumerate(d["净利率"]):
-        ax1.text(i, v - 1.1, f"{v:.1f}%", ha="center", fontsize=8.5, color="#55A868")
-    ax1.set_ylim(min(d["净利率"]) * 0.85, max(d["毛利率"]) * 1.1)
-    ax1.set_ylabel("利润率（%）", fontsize=11)
+        if v is not None and np.isfinite(v):
+            ax1.text(i, v - 1.1, f"{format_number(v)}%", ha="center", fontsize=8.5, color="#55A868")
+    finite_profit = [float(v) for series in profit_series for v in series if v is not None and np.isfinite(v)]
+    if finite_profit:
+        p_lo, p_hi = min(finite_profit), max(finite_profit)
+        p_span = max(p_hi - p_lo, 1.0)
+        ax1.set_ylim(p_lo - p_span * 0.12, p_hi + p_span * 0.16)
+    ax1.set_ylabel(d.get("利润率轴名称", "比例（%）"), fontsize=11)
     ax2 = ax1.twinx()
-    ax2.bar(x, d["ROE"], color="#DD8452", alpha=0.65, width=0.5, label="ROE（%）")
+    ax2.bar(x, d["ROE"], color="#DD8452", alpha=0.65, width=0.5, label=d.get('ROE名称', 'ROE（%）'))
     for i, v in enumerate(d["ROE"]):
-        if not np.isnan(v):
-            ax2.text(i, v + _dy(d["ROE"]), f"{v:.1f}%", ha="center", fontsize=8.5, color="#DD8452")
-    ax2.set_ylabel("ROE（%）", color="#DD8452", fontsize=11)
+        if v is not None and np.isfinite(v):
+            ax2.text(i, v + _dy(d["ROE"]), f"{format_number(v)}%", ha="center", fontsize=8.5, color="#DD8452")
+    ax2.set_ylabel(d.get("ROE轴名称", "ROE（%）"), color="#DD8452", fontsize=11)
     ax1.set_xticks(list(x)); ax1.set_xticklabels(labels)
-    ax1.set_title(d.get("标题", "图04 盈利能力趋势") + " → §4 财务分析", fontsize=13, fontweight="bold")
+    ax1.set_title(_section_title(d.get("标题"), "图04 盈利能力趋势", "§4 财务分析"), fontsize=13, fontweight="bold")
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=3, fontsize=9)
@@ -792,6 +929,7 @@ def fig_profitability(ops: dict) -> plt.Figure | None:
     return fig
 
 
+@latest_chart("图05")
 def fig_cashflow(ops: dict) -> plt.Figure | None:
     d = ops.get("cashflow")
     if not d:
@@ -809,12 +947,13 @@ def fig_cashflow(ops: dict) -> plt.Figure | None:
     ax2 = ax.twinx()
     ax2.plot(x, d["FCF"], marker="D", color="#4C72B0", lw=2.5, markersize=8, label="自由现金流 FCF（亿元）")
     for i, v in enumerate(d["FCF"]):
-        ax2.text(i, v + max(d["FCF"])*0.05, f"{v:.0f}", ha="center", fontsize=9, color="#4C72B0", fontweight="bold")
+        if v is not None and np.isfinite(v):
+            ax2.text(i, v + max(d["FCF"])*0.05, f"{format_number(v)}", ha="center", fontsize=9, color="#4C72B0", fontweight="bold")
     if d.get("D_A"):
         ax2.plot(x, d["D_A"], marker="^", color="#8B5CF6", lw=1.8, markersize=6, ls="--", label="折旧摊销 D&A（亿元）")
     ax.set_xticks(list(x)); ax.set_xticklabels(labels)
     ax.set_ylabel("金额（亿元）", fontsize=11)
-    ax.set_title(d.get("标题", "图05 现金流结构") + " → §4 财务分析", fontsize=13, fontweight="bold")
+    ax.set_title(_section_title(d.get("标题"), "图05 现金流结构", "§4 财务分析"), fontsize=13, fontweight="bold")
     lines1, labels1 = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=9)
@@ -877,7 +1016,8 @@ def fig_peers(ops: dict) -> plt.Figure | None:
     use_pb = len(pe_rows) < 3
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.8))
     xk = "PB" if use_pb else "PE"
-    xlab = "PB（2025 年报口径）" if use_pb else "PE (TTM)"
+    basis = ops.get("peer_valuation_basis")
+    xlab = f"{xk}（{basis}）" if basis else ("PB（最近披露权益）" if use_pb else "PE (TTM)")
     ttl = "PB vs ROE（PE 失真，以 PB 替代）" if use_pb else "PE vs ROE"
     n1 = 0
     for row in peers:
@@ -885,12 +1025,16 @@ def fig_peers(ops: dict) -> plt.Figure | None:
         if xv is None or roe is None:
             continue
         n1 += 1
-        hl = row.get("高亮", False)
+        # 只接受显式“标的”标记。旧版任意同行的“高亮=true”会把错误公司标红，
+        # 因此不再把高亮字段当作目标公司身份。
+        hl = row.get("标的") is True or row.get("target") is True
         ax1.scatter(xv, roe, s=260 if hl else 150, c="#C44E52" if hl else "#4C72B0",
                     zorder=3 if hl else 2, edgecolors="white" if hl else "none", lw=1.5)
         ax1.annotate(name, (xv, roe), textcoords="offset points", xytext=(8, 6),
                      fontsize=9, fontweight="bold" if hl else "normal", color="#C44E52" if hl else "#333")
-    ax1.set_xlabel(xlab, fontsize=11); ax1.set_ylabel("ROE（%）", fontsize=11)
+    period_review = ops.get("peers_period", {}).get("period_review", {})
+    financial_basis = period_review.get("basis", "FY")
+    ax1.set_xlabel(xlab, fontsize=11); ax1.set_ylabel("ROE（%；累计非年化）" if financial_basis != "FY" else "ROE（%）", fontsize=11)
     ax1.set_title(ttl, fontsize=12, fontweight="bold"); ax1.grid(alpha=0.25)
     if n1 < 2:
         p(f"[WARN] 图06 左面板（{xk} vs ROE）仅 {n1} 个数据点，同行估值对比意义有限，请在报告中说明")
@@ -900,7 +1044,7 @@ def fig_peers(ops: dict) -> plt.Figure | None:
         if rg is None or ng is None:
             continue
         n2 += 1
-        hl = row.get("高亮", False)
+        hl = row.get("标的") is True or row.get("target") is True
         ax2.scatter(rg, ng, s=260 if hl else 150, c="#C44E52" if hl else "#4C72B0",
                     zorder=3 if hl else 2, edgecolors="white" if hl else "none", lw=1.5)
         ax2.annotate(name, (rg, ng), textcoords="offset points", xytext=(8, 6),
@@ -911,7 +1055,8 @@ def fig_peers(ops: dict) -> plt.Figure | None:
     if n2 < 2:
         p(f"[WARN] 图06 右面板（增速对比）仅 {n2} 个数据点，请在报告中说明数据缺失")
     fig.suptitle("图06 同行估值与增长对比 → §6 估值", fontsize=13, fontweight="bold", y=1.01)
-    fig.text(0.5, -0.02, SRC, ha="center", fontsize=8, color="gray")
+    period_note = f"财务统一期 {period_review.get('period_end', '待核')}（{financial_basis}）；{period_review.get('reason', '')}"
+    fig.text(0.5, -0.02, textwrap.fill(period_note, width=100) + "\n" + SRC, ha="center", fontsize=8, color="gray")
     return fig
 
 
@@ -922,7 +1067,7 @@ def fig_dps(div: pd.DataFrame | None, ops: dict) -> plt.Figure | None:
             rows = []
             for _, r in div.iterrows():
                 rd = str(r.get("报告期", ""))
-                if rd[:4] in ("2019","2020","2021","2022","2023","2024","2025") and rd.endswith("12-31"):
+                if re.match(r"^\d{4}-12-31$", rd[:10]):
                     rows.append((rd[:4], num(r.get("现金分红-现金分红比例"))))
             if rows:
                 labels = [a for a,_ in rows]; dps_vals = [v if v is not None else np.nan for _,v in rows]
@@ -939,21 +1084,23 @@ def fig_dps(div: pd.DataFrame | None, ops: dict) -> plt.Figure | None:
     ax1.bar(x, dps_vals, color="#55A868", alpha=0.85, width=0.5, label="DPS（元）")
     for i, v in enumerate(dps_vals):
             if not np.isnan(v):
-                ax1.text(i, v + 0.05, f"{v:.2f}", ha="center", fontsize=9, fontweight="bold")
+                ax1.text(i, v + 0.05, f"{format_number(v)}", ha="center", fontsize=9, fontweight="bold")
     ax1.set_ylabel("DPS（元）", color="#55A868", fontsize=11)
     if payout:
         ax2 = ax1.twinx()
         ax2.plot(x, payout, marker="o", color="#C44E52", lw=2.5, markersize=7, label="支付率（%）")
         for i, v in enumerate(payout):
             if not np.isnan(v):
-                ax2.text(i, v + 1.5, f"{v:.0f}%", ha="center", fontsize=9, color="#C44E52")
+                ax2.text(i, v + 1.5, f"{format_number(v)}%", ha="center", fontsize=9, color="#C44E52")
         ax2.set_ylim(0, max(payout)*1.5 or 100)
         ax2.set_ylabel("支付率（%）", color="#C44E52", fontsize=11)
     ax1.set_xticks(list(x)); ax1.set_xticklabels(labels)
     note = d.get("注","") if d else ""
     ax1.set_title("图07 DPS与支付率 → §4 财务分析", fontsize=13, fontweight="bold")
     fig.legend(loc="upper left", bbox_to_anchor=(0.13,0.88), fontsize=9)
-    ax1.set_xlabel(f"{note} ｜ {SRC}" if note else f"年度 ｜ {SRC}", fontsize=8)
+    ax1.set_xlabel(f"归属财年 ｜ {SRC}", fontsize=8)
+    if note:
+        fig.text(.5, -.04, textwrap.fill(note, width=90), ha="center", va="top", fontsize=9, color="#555555")
     return fig
 
 
@@ -968,17 +1115,20 @@ def fig_price(data_dir: Path) -> plt.Figure | None:
         return None
     df[date_c] = pd.to_datetime(df[date_c])
     df = df.sort_values(date_c)
+    # Use a common ten-year observation window regardless of provider history length.
+    cutoff = df[date_c].max() - pd.DateOffset(years=10)
+    df = df[df[date_c] >= cutoff]
     cur = float(df.iloc[-1][close_c])
-    pct_rank = (df[close_c] < cur).mean() * 100
+    pct_rank = (df[close_c] <= cur).mean() * 100
     fig, ax = plt.subplots(figsize=(12, 5.5))
     ax.plot(df[date_c], df[close_c], color="#4C72B0", lw=1.2)
     ax.fill_between(df[date_c], df[close_c], df[close_c].min(), alpha=0.08, color="#4C72B0")
     ax.axhline(cur, color="#C44E52", ls="--", lw=1.5)
-    ax.annotate(f"当前 {cur:.2f} 元（分位 {pct_rank:.1f}%）",
+    ax.annotate(f"当前 {format_number(cur)} 元（分位 {format_number(pct_rank)}%）",
                 xy=(df.iloc[-1][date_c], cur), xytext=(-180, 30),
                 textcoords="offset points", color="#C44E52", fontsize=10, fontweight="bold",
                 arrowprops=dict(arrowstyle="->", color="#C44E52", lw=1.5))
-    ax.set_title(f"图08 股价走势（前复权，当前 {pct_rank:.1f}% 分位） → §6 估值", fontsize=13, fontweight="bold")
+    ax.set_title(f"图08 十年股价走势（前复权，当前 {format_number(pct_rank)}% 分位） → §6 估值", fontsize=13, fontweight="bold")
     ax.set_ylabel("收盘价（元）", fontsize=11)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m"))
     ax.xaxis.set_major_locator(mdates.MonthLocator(interval=4))
@@ -1002,7 +1152,9 @@ def fig_targets(ops: dict) -> plt.Figure | None:
     fig, ax = plt.subplots(figsize=(12, 5.5))
     ax.bar(labels, vals, color=colors, alpha=0.9, width=0.6)
     for i, v in enumerate(vals):
-        ax.text(i, v + 1.5, f"{v:.0f}", ha="center", fontsize=11, fontweight="bold", color=colors[i])
+        label = f"{format_number(v)}"
+        ax.text(i, v + (1.5 if v >= 0 else -1.0), label, ha="center",
+                va="bottom" if v >= 0 else "top", fontsize=11, fontweight="bold", color=colors[i])
     ax.set_ylabel("目标价（元）", fontsize=11)
     ax.set_title("图09 多框架目标价对比 → §7 投资建议", fontsize=13, fontweight="bold")
     ax.text(0.5, -0.14, d.get("注", SRC), ha="center", fontsize=8, color="gray", transform=ax.transAxes)
@@ -1018,12 +1170,21 @@ def fig_penetration(ops: dict) -> plt.Figure | None:
     colors = (["#C44E52", "#55A868", "#DD8452", "#4C72B0"] * (len(gg) // 3 + 1))[:len(gg)]
     fig, ax = plt.subplots(figsize=(10, 5.5))
     ax.bar(labels, gg, color=colors, width=0.5)
+    finite = [float(v) for v in gg + [ii] if v is not None and np.isfinite(v)]
+    lo, hi = min([0.0] + finite), max([0.0] + finite)
+    span = max(hi - lo, 1.0)
+    label_pad = max(0.25, span * 0.05)
     for i, v in enumerate(gg):
-        ax.text(i, v + max(gg)*0.06, f"{v:.2f}%", ha="center", fontsize=11, fontweight="bold", color=colors[i])
+        y = v + label_pad if v >= 0 else v - label_pad
+        ax.text(i, y, f"{format_number(v)}%", ha="center", va="bottom" if v >= 0 else "top",
+                fontsize=11, fontweight="bold", color=colors[i])
     ax.axhline(ii, color="#4C72B0", lw=2.5, ls="--")
-    ax.text(len(labels)-0.4, ii + max(gg)*0.06, f"门槛 II = {ii:.2f}%", fontsize=10, color="#4C72B0", fontweight="bold")
+    ii_y = ii + label_pad if ii >= 0 else ii - label_pad
+    ax.text(len(labels)-0.4, ii_y, f"门槛 II = {format_number(ii)}%", fontsize=10, color="#4C72B0",
+            fontweight="bold", va="bottom" if ii >= 0 else "top")
     ax.set_ylabel("穿透回报率（%）", fontsize=11)
-    ax.set_ylim(0, max(max(gg)*1.32, ii*1.15))  # ylim 需容纳门槛线（GG 远低于 II 时防截断）
+    ax.axhline(0, color="#888888", lw=1.0, alpha=0.55)
+    ax.set_ylim(lo - max(label_pad, span * 0.12), hi + max(label_pad, span * 0.16))
     ax.set_title("图10 穿透回报率 GG vs 门槛 II → §6 估值", fontsize=13, fontweight="bold")
     ax.text(0.5, -0.14, d.get("注", SRC), ha="center", fontsize=8, color="gray", transform=ax.transAxes)
     return fig
@@ -1035,26 +1196,48 @@ def fig_sensitivity(ops: dict) -> plt.Figure | None:
         return None
     fig, ax = plt.subplots(figsize=(10, 5.5))
     colors = ["#C44E52", "#55A868", "#DD8452", "#4C72B0"]
+    x = d.get("x", [])
     for i, s in enumerate(d["系列"]):
-        ax.plot(d["x"], s["y"], marker="o", color=colors[i%len(colors)], lw=2.5, markersize=8, label=s["name"])
+        y = s.get("y", [])
+        ax.plot(x, y, marker="o", color=colors[i%len(colors)], lw=2.5, markersize=8, label=s["name"])
         if i == 0:  # 仅标注首系列，防多系列近值标签重叠（G8-RENDER；昊华批次校准）
-            for xi, yi in zip(d["x"], s["y"]):
-                ax.text(xi, yi+0.08, f"{yi:.2f}%", ha="center", fontsize=8, color=colors[i%len(colors)])
-    all_y = [yy for ss in d["系列"] for yy in ss.get("y", [])] + ([d["门槛"]] if d.get("门槛") else [])
+            for j, (xi, yi) in enumerate(zip(x, y)):
+                if yi is not None and np.isfinite(yi):
+                    near_above = any(
+                        j < len(other.get("y", []))
+                        and (other_y := other["y"][j]) is not None
+                        and np.isfinite(other_y)
+                        and 0 < other_y - yi < 0.25
+                        for other in d["系列"][1:]
+                    )
+                    ax.text(xi, yi - 0.08 if near_above else yi + 0.08,
+                            f"{format_number(yi)}%", ha="center", va="top" if near_above else "bottom",
+                            fontsize=8, color=colors[i%len(colors)])
+    all_y = [float(yy) for ss in d["系列"] for yy in ss.get("y", [])
+             if yy is not None and np.isfinite(yy)]
+    if d.get("门槛") is not None and np.isfinite(d["门槛"]):
+        all_y.append(float(d["门槛"]))
     if all_y:
-        ax.set_ylim(min(all_y)*0.9, max(all_y)*1.2)
-    if d.get("门槛"):
+        lo, hi = min(all_y), max(all_y)
+        pad = max((hi - lo) * 0.1, 0.2)
+        ax.set_ylim(lo - pad, hi + max(pad, (hi - lo) * 0.2))
+    if d.get("门槛") is not None:
         ax.axhline(d["门槛"], color="#4C72B0", lw=2, ls="--")
-        ax.text(d["x"][0]+0.02, d["门槛"] + (max(all_y)-min(all_y))*0.05, f"门槛 II = {d['门槛']:.2f}%", fontsize=10, color="#4C72B0", fontweight="bold")
+        spread = max(all_y) - min(all_y) if all_y else 1.0
+        ax.text(x[0], d["门槛"] + max(spread * 0.05, 0.1),
+                f"门槛 II = {format_number(d['门槛'])}%", fontsize=10, color="#4C72B0", fontweight="bold")
     ax.set_xlabel(d.get("xlabel", "情景因子"), fontsize=11)
     ax.set_ylabel(d.get("ylabel", "回报率（%）"), fontsize=11)
-    ax.set_title(d.get("标题", "图11 敏感性分析") + " → §6 估值", fontsize=13, fontweight="bold")
-    ax.legend(fontsize=9, loc="upper left"); ax.grid(alpha=0.25)
-    ax.set_xlim(min(d["x"])-0.03, max(d["x"])+0.03)
-    ax.text(0.5, -0.12, f"{SRC}", ha="center", fontsize=8, color="gray", transform=ax.transAxes)
+    ax.set_title(_section_title(d.get("标题"), "图11 敏感性分析", "§6 估值"), fontsize=13, fontweight="bold")
+    ax.legend(fontsize=9, loc="upper right"); ax.grid(alpha=0.25)
+    ax.set_xlim(min(x)-0.03, max(x)+0.03)
+    note = textwrap.fill(str(d.get("注", "")).strip(), width=105)
+    ax.text(0.5, -0.14, " ｜ ".join(v for v in (note, SRC) if v),
+            ha="center", va="top", fontsize=8, color="gray", transform=ax.transAxes)
     return fig
 
 
+@latest_chart("图12")
 def fig_forecast(ops: dict) -> plt.Figure | None:
     d = ops.get("forecast")
     if not d:
@@ -1063,22 +1246,40 @@ def fig_forecast(ops: dict) -> plt.Figure | None:
     hist_x = np.arange(len(d["labels_hist"]))
     ax.bar(hist_x, d["np_hist"], color="#4C72B0", alpha=0.8, width=0.5, label="历史归母净利（亿元）")
     for i, v in enumerate(d["np_hist"]):
-        ax.text(i, v+0.8, f"{v:.1f}", ha="center", fontsize=8.5, color="#4C72B0")
+        if v is not None and np.isfinite(v):
+            ax.text(i, v+0.8, f"{format_number(v)}", ha="center", fontsize=8.5, color="#4C72B0")
     fcast_x = np.arange(len(d["labels_hist"]), len(d["labels_hist"]) + len(d["labels_fcast"]))
     for name, color, ls in [("悲观","#C44E52","--"), ("基准","#4C72B0","-"), ("乐观","#55A868","-.")]:
         if name in d:
             ax.plot(fcast_x, d[name], marker="o", color=color, lw=2.5, ls=ls, markersize=7, label=f"{name}预测")
             for i, v in enumerate(d[name]):
-                ax.text(fcast_x[i], v+0.8, f"{v:.1f}", ha="center", fontsize=8.5, color=color)
+                ax.text(fcast_x[i], v+0.8, f"{format_number(v)}", ha="center", fontsize=8.5, color=color)
     ax.axvline(len(d["labels_hist"])-0.5, color="gray", ls=":", lw=1)
     ax.text(len(d["labels_hist"])-0.48, max(d["np_hist"])*1.05, "← 历史 ｜ 预测 →", fontsize=9, color="gray")
     all_labs = d["labels_hist"] + d["labels_fcast"]
     ax.set_xticks(list(hist_x) + list(fcast_x)); ax.set_xticklabels(all_labs)
     ax.set_ylabel("归母净利（亿元）", fontsize=11)
-    ax.set_title(d.get("标题", "图12 盈利预测：历史与三情景") + " → §5 盈利预测", fontsize=13, fontweight="bold")
+    ax.set_title(_section_title(d.get("标题"), "图12 盈利预测：历史与三情景", "§5 盈利预测"), fontsize=13, fontweight="bold")
     ax.legend(fontsize=9, loc="upper left")
     ax.set_xlabel(f"年份 ｜ 预测值为估计 ｜ {SRC}", fontsize=8)
     return fig
+
+
+def _peer_history_panel(ax, data: dict, metric: str) -> None:
+    """Optional contemporaneously available peer ratios; do not recompute future FY at old prices."""
+    labels = data.get('labels', [])
+    x = np.arange(len(labels))
+    for s in data.get('series', []):
+        vals = [_fnum(v) for v in s.get('values', [])]
+        if len(vals) != len(labels):
+            raise ValueError('peer_history labels/values length mismatch')
+        ax.plot(x, vals, marker='o', lw=2.5 if s.get('target') else 1.5,
+                label=s['name'], alpha=1.0 if s.get('target') else .8)
+    ax.set_xticks(x); ax.set_xticklabels(labels)
+    ax.set_ylabel(metric)
+    ax.set_title(f'同行历史 {metric}（逐时点已披露口径）', fontsize=11, fontweight='bold')
+    ax.legend(fontsize=8, loc='best'); ax.grid(alpha=.2)
+    ax.set_xlabel(data.get('note', 'TTM盈利/最近已披露权益；EPS加总为近似'), fontsize=7)
 
 
 def fig_pe_band(ops: dict) -> plt.Figure | None:
@@ -1091,22 +1292,38 @@ def fig_pe_band(ops: dict) -> plt.Figure | None:
     pe_low = np.array([_fnum(v) for v in d["pe_low"]], dtype=float)
     pe_mean = np.array([_fnum(v) for v in d["pe_mean"]], dtype=float)
     pe_ttm = np.array([_fnum(v) for v in d["pe_ttm"]], dtype=float)
-    fig, ax = plt.subplots(figsize=(10, 5.5))
+    if d.get('peer_history'):
+        fig, (ax, peer_ax) = plt.subplots(1, 2, figsize=(16, 5.5))
+        _peer_history_panel(peer_ax, d['peer_history'], 'PE(TTM)')
+    else:
+        fig, ax = plt.subplots(figsize=(10, 5.5))
     band = np.isfinite(pe_low) & np.isfinite(pe_high)
     if band.any():
         ax.fill_between(x[band], pe_low[band], pe_high[band], alpha=0.12, color="#4C72B0")
     ax.plot(x, pe_high, color="#C44E52", lw=1.5, ls="--", label="PE 高点")
     ax.plot(x, pe_low, color="#55A868", lw=1.5, ls="--", label="PE 低点")
-    ax.plot(x, pe_mean, color="#8B5CF6", lw=1.8, ls="-.", label="PE 均值")
-    ax.plot(x, pe_ttm, marker="o", color="#4C72B0", lw=3, markersize=9, label="PE(TTM)")
-    for i, v in enumerate(pe_ttm):
-        if not np.isfinite(v):
-            continue  # TTM 亏损期 PE 无定义：不标注，折线呈 NaN 缺口（2026-08-21 牧原校准写回）
-        ax.text(i, v-3.5, f"{v:.1f}x", ha="center", fontsize=9, color="#4C72B0", fontweight="bold")
-    ax.set_xticks(list(x)); ax.set_xticklabels(labels)
+    ax.plot(x, pe_mean, color="#8B5CF6", lw=1.8, ls="-.", label=d.get("center_label", "PE 均值"))
+    # Keep the full monthly line and valuation band, but show only sparse
+    # markers. A marker at every observation makes long monthly histories look
+    # like a row of labels even when only the latest value is annotated.
+    finite_idx = np.flatnonzero(np.isfinite(pe_ttm))
+    mark_idx = finite_idx[np.unique(np.linspace(0, len(finite_idx) - 1, min(8, len(finite_idx)), dtype=int))] if len(finite_idx) else []
+    ax.plot(x, pe_ttm, color="#4C72B0", lw=2.4, marker="o", markersize=4.5,
+            markevery=mark_idx, label="PE(TTM)")
+    # Dense monthly valuation bands make point labels overlap. Label only the
+    # latest finite observation; the line and band retain the full time series.
+    if len(finite_idx):
+        i = int(finite_idx[-1]); v = pe_ttm[i]
+        ax.text(i, v-3.5, f"{format_number(v)}x", ha="center", fontsize=9, color="#4C72B0", fontweight="bold")
+    ticks = np.unique(np.linspace(0, len(x)-1, min(6 if d.get('peer_history') else 9, len(x)), dtype=int)) if len(x) else []
+    ax.set_xticks(ticks); ax.set_xticklabels([str(labels[i])[:7] for i in ticks])
     ax.set_ylabel("PE (TTM)", fontsize=11)
-    ax.set_title(d.get("标题", "图13 PE_TTM 估值带") + " → §6 估值", fontsize=13, fontweight="bold")
-    ax.legend(fontsize=9, loc="upper right")
+    ax.set_title(_section_title(d.get("标题"), "图13 PE_TTM 估值带", "§6 估值"), fontsize=13, fontweight="bold")
+    if d.get('peer_history'):
+        handles, names = ax.get_legend_handles_labels()
+        fig.legend(handles, names, loc='upper center', bbox_to_anchor=(.25, 1.075), ncol=4, fontsize=8, frameon=False)
+    else:
+        ax.legend(fontsize=9, loc="upper right")
     ax.set_xlabel(f"时点 ｜ {SRC}", fontsize=8)
     return fig
 
@@ -1120,45 +1337,68 @@ def fig_pb_band(ops: dict) -> plt.Figure | None:
     pb_high = np.array([_fnum(v) for v in d["pb_high"]], dtype=float)
     pb_low = np.array([_fnum(v) for v in d["pb_low"]], dtype=float)
     pb = np.array([_fnum(v) for v in d["pb"]], dtype=float)
-    fig, ax = plt.subplots(figsize=(10, 5.5))
+    if d.get('peer_history'):
+        fig, (ax, peer_ax) = plt.subplots(1, 2, figsize=(16, 5.5))
+        _peer_history_panel(peer_ax, d['peer_history'], 'PB')
+    else:
+        fig, ax = plt.subplots(figsize=(10, 5.5))
     band = np.isfinite(pb_low) & np.isfinite(pb_high)
     if band.any():
         ax.fill_between(x[band], pb_low[band], pb_high[band], alpha=0.12, color="#DD8452")
     ax.plot(x, pb_high, color="#C44E52", lw=1.5, ls="--", label="PB 高点")
     ax.plot(x, pb_low, color="#55A868", lw=1.5, ls="--", label="PB 低点")
-    ax.plot(x, pb, marker="o", color="#DD8452", lw=3, markersize=9, label="PB")
-    for i, v in enumerate(pb):
-        if not np.isfinite(v):
-            continue
-        ax.text(i, v+0.15, f"{v:.2f}x", ha="center", fontsize=9, color="#DD8452", fontweight="bold")
-    ax.set_xticks(list(x)); ax.set_xticklabels(labels)
+    finite_idx = np.flatnonzero(np.isfinite(pb))
+    mark_idx = finite_idx[np.unique(np.linspace(0, len(finite_idx) - 1, min(8, len(finite_idx)), dtype=int))] if len(finite_idx) else []
+    ax.plot(x, pb, color="#DD8452", lw=2.4, marker="o", markersize=4.5,
+            markevery=mark_idx, label="PB")
+    if len(finite_idx):
+        i = int(finite_idx[-1]); v = pb[i]
+        ax.text(i, v+0.15, f"{format_number(v)}x", ha="center", fontsize=9, color="#DD8452", fontweight="bold")
+    ticks = np.unique(np.linspace(0, len(x)-1, min(6 if d.get('peer_history') else 9, len(x)), dtype=int)) if len(x) else []
+    ax.set_xticks(ticks); ax.set_xticklabels([str(labels[i])[:7] for i in ticks])
     ax.set_ylabel("PB", fontsize=11)
-    ax.set_title(d.get("标题", "图14 PB 估值带") + " → §6 估值", fontsize=13, fontweight="bold")
-    ax.legend(fontsize=9, loc="upper right")
+    ax.set_title(_section_title(d.get("标题"), "图14 PB 估值带", "§6 估值"), fontsize=13, fontweight="bold")
+    if d.get('peer_history'):
+        handles, names = ax.get_legend_handles_labels()
+        fig.legend(handles, names, loc='upper center', bbox_to_anchor=(.25, 1.075), ncol=2, fontsize=8, frameon=False)
+    else:
+        ax.legend(fontsize=9, loc="upper right")
     ax.set_xlabel(f"时点 ｜ {SRC}", fontsize=8)
     return fig
 
 
+@latest_chart("图15")
 def fig_leverage(ops: dict) -> plt.Figure | None:
     d = ops.get("leverage")
     if not d:
         return None
     labels = d["labels"]
     fig, ax = plt.subplots(figsize=(10, 5.5))
-    x = range(len(labels))
+    x = np.arange(len(labels))
     ax.plot(x, d["资产负债率"], marker="o", color="#C44E52", lw=2.5, markersize=7, label="资产负债率（%）")
     if "有息负债率" in d:
-        ax.plot(x, d["有息负债率"], marker="s", color="#DD8452", lw=2.5, markersize=7, label="有息负债率（%）")
-    ax.set_ylabel("负债率（%）", fontsize=11)
+        ax.plot(x, d["有息负债率"], marker="s", color="#DD8452", lw=2.5, markersize=7,
+                label="有息负债/总资产（%）")
+    ax.set_ylabel("资产负债率 / 有息负债占比（%）", fontsize=11)
     ax2 = ax.twinx()
-    ax2.bar(x, d["净现金"], color="#55A868", alpha=0.7, width=0.45, label="净现金（亿元，正=净现金）")
-    ax2.set_ylabel("净现金（亿元）", color="#55A868", fontsize=11)
+    net_cash = d.get("净现金", [])
+    valid_cash = [(i, v) for i, v in enumerate(net_cash)
+                  if v is not None and np.isfinite(v)]
+    if valid_cash:
+        ax2.bar([i for i, _ in valid_cash], [v for _, v in valid_cash],
+                color="#55A868", alpha=0.7, width=0.45,
+                label=f"净现金（{d.get('净现金单位', '亿元')}，正=净现金）")
+    cash_unit = d.get("净现金单位", "亿元")
+    ax2.set_ylabel(f"净现金（{cash_unit}）", color="#55A868", fontsize=11)
     ax.set_xticks(list(x)); ax.set_xticklabels(labels)
-    ax.set_title(d.get("标题", "图15 杠杆与负债结构") + " → §4 财务分析", fontsize=13, fontweight="bold")
+    ax.set_title(_section_title(d.get("标题"), "图15 杠杆与负债结构", "§4 财务分析"), fontsize=13, fontweight="bold")
     lines1, labels1 = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize=9)
+    note = textwrap.fill(str(d.get("注", "")).strip(), width=105)
     ax.set_xlabel(f"年份 ｜ {SRC}", fontsize=8)
+    if note:
+        ax.text(0.5, -0.14, note, ha="center", va="top", fontsize=8, color="gray", transform=ax.transAxes)
     return fig
 
 
@@ -1181,20 +1421,21 @@ def fig_sotp(ops: dict) -> plt.Figure | None:
     y = list(range(len(segs)))[::-1]
     ax1.barh(y, vals, color=colors[:len(segs)], alpha=0.9, height=0.55)
     for yi, v, nm, pc in zip(y, vals, names, pcts):
-        ax1.text(v + max(vals) * 0.015, yi, f"{nm} {v:.0f}亿 ({pc*100:.0f}%)",
+        ax1.text(v + max(vals) * 0.015, yi, f"{nm} {format_number(v)}亿 ({format_number(pc*100)}%)",
                  va="center", fontsize=9, color="#333333")
     ax1.set_yticks([])
     ax1.set_xlabel("分部价值（亿元）", fontsize=10)
-    ax1.set_title(f"SOTP 分部价值贡献（EV≈{sum(vals):.0f} 亿）", fontsize=12, fontweight="bold")
+    basis_label = "股权价值" if all(s.get("basis", "net_profit") == "net_profit" for s in segs) else "分部价值"
+    ax1.set_title(f"SOTP {basis_label}贡献（合计≈{format_number(sum(vals))} 亿）", fontsize=12, fontweight="bold")
     ax1.set_xlim(0, max(vals) * 1.45)
     # 调整项（净现金/少数股东/控股折价）标注在右面板脚注，避免条形图视觉混乱
     note_adj = []
     if adj.get("net_cash"):
-        note_adj.append(f"+净现金 {adj['net_cash']:.1f} 亿")
+        note_adj.append(f"+净现金 {format_number(adj['net_cash'])} 亿")
     if adj.get("minority"):
-        note_adj.append(f"−少数股东 {adj['minority']:.1f} 亿")
+        note_adj.append(f"−少数股东 {format_number(adj['minority'])} 亿")
     if adj.get("holding_discount", 1.0) != 1.0:
-        note_adj.append(f"×控股折价 {adj['holding_discount']:.2f}")
+        note_adj.append(f"×控股折价 {format_number(adj['holding_discount'])}")
     adj_txt = "，".join(note_adj) if note_adj else "无调整项"
     # 右面板：每股 SOTP vs 现价
     per = float(d["per_share"]); lo = float(d.get("per_share_low", per)); hi = float(d.get("per_share_high", per))
@@ -1202,19 +1443,19 @@ def fig_sotp(ops: dict) -> plt.Figure | None:
     ax2.bar(["每股 SOTP"], [per], color="#4C72B0", alpha=0.9, width=0.45,
             yerr=[[per - lo], [hi - per]], capsize=8, error_kw=dict(lw=1.6, color="#333333"))
     ax2.text(0, per + (hi - per) * 0.5 + (max(hi, price) - min(lo, price)) * 0.02,
-             f"{per:.1f} 元", ha="center", fontsize=12, fontweight="bold", color="#4C72B0")
-    ax2.text(0, lo - (max(hi, price) - min(lo, price)) * 0.06, f"低 {lo:.1f} ｜ 高 {hi:.1f}",
+             f"{format_number(per)} 元", ha="center", fontsize=12, fontweight="bold", color="#4C72B0")
+    ax2.text(0, lo - (max(hi, price) - min(lo, price)) * 0.06, f"低 {format_number(lo)} ｜ 高 {format_number(hi)}",
              ha="center", fontsize=8.5, color="#555555")
     if price:
         ax2.axhline(price, color="#C44E52", ls="--", lw=2)
-        ax2.text(0.35, price, f"现价 {price:.1f} 元", color="#C44E52", fontsize=10, fontweight="bold", va="bottom")
+        ax2.text(0.35, price, f"现价 {format_number(price)} 元", color="#C44E52", fontsize=10, fontweight="bold", va="bottom")
     ymin = min(lo, price) * 0.75
     ymax = max(hi, price) * 1.25
     ax2.set_ylim(ymin, ymax)
     ax2.set_ylabel("元/股", fontsize=10)
-    ax2.set_title(f"每股 SOTP vs 现价（溢价 {d.get('premium', 0)*100:.0f}%）",
+    ax2.set_title(f"每股 SOTP vs 现价（溢价 {format_number(d.get('premium', 0)*100)}%）",
                   fontsize=12, fontweight="bold")
-    fig.suptitle(d.get("标题", "图18 分部估值 SOTP") + " → §6 估值", fontsize=13, fontweight="bold", y=1.00)
+    fig.suptitle(_section_title(d.get("标题"), "图18 分部估值 SOTP", "§6 估值"), fontsize=13, fontweight="bold", y=1.00)
     fig.text(0.5, -0.02, f"调整：{adj_txt} ｜ 分部盈利为估算时标注「手算/补充」 ｜ {SRC}",
              ha="center", fontsize=8, color="gray", transform=fig.transFigure)
     return fig
@@ -1236,6 +1477,7 @@ def main() -> int:
 
     proj = Path(args.dir)
     data_dir = proj / "data"
+    latest_pack = configure_latest(data_dir, write=True)
     ops: dict = {}
     if args.ops:
         ops_f = Path(args.ops)
@@ -1244,7 +1486,7 @@ def main() -> int:
     else:
         ops_f = proj / "input" / "运营补充数据.json"
     if ops_f.exists():
-        ops = json.loads(ops_f.read_text(encoding="utf-8"))
+        ops = json.loads(ops_f.read_text(encoding="utf-8-sig"))
         p(f"[加载] 运营补充数据: {ops_f}")
     else:
         p(f"[提示] 无运营补充数据（{ops_f}），使用 CSV 自动图表；运营图按 --ops 补充")
@@ -1272,12 +1514,15 @@ def main() -> int:
                     continue
     if not data_date:
         data_date = pd.Timestamp.today().strftime("%Y-%m-%d")
-    SRC = f"数据：东财/公司公告/行情源 ｜ 数据截至 {data_date}"
+    SRC = f"来源：财报CSV/公司公告/行情源 ｜ 财报最新 {latest_pack.get('latest_period') or '未取得'}；行情至 {data_date}"
     p(f"[数据日期] {data_date}")
-    out_dir = Path(args.out) if args.out else proj / "reports" / "图表"
+    out_dir = (proj / args.out if args.out and not Path(args.out).is_absolute()
+               else Path(args.out) if args.out else proj / "reports" / "图表")
     out_dir.mkdir(parents=True, exist_ok=True)
-    html_out = (Path(args.html_out) if args.html_out
+    html_out = (proj / args.html_out if args.html_out and not Path(args.html_out).is_absolute()
+                else Path(args.html_out) if args.html_out
                 else proj / "reports" / f"{args.name or '公司'}_{args.code}_图表.html")
+    html_out.parent.mkdir(parents=True, exist_ok=True)
 
     pl_raw = load_csv(data_dir, "利润表_按报告期.csv")
     fi_raw = load_csv(data_dir, "主要财务指标_按报告期.csv")
@@ -1286,45 +1531,60 @@ def main() -> int:
     fi_y = year_rows(fi_raw) if fi_raw is not None else None
 
     jobs = [
-        ("图01_营收与归母净利.png",          fig_revenue(pl_y) if pl_y is not None else None),
-        ("图02_ROE与BPS.png",               fig_roe_bps(fi_y) if fi_y is not None else None),
-        ("图03_分部营收构成与增速.png",       fig_segment(ops)),
-        ("图04_盈利能力趋势.png",             fig_profitability(ops)),
-        ("图05_现金流结构.png",               fig_cashflow(ops)),
-        ("图06_同行估值与增长对比.png",       fig_peers(ops)),
-        ("图07_DPS与支付率.png",             fig_dps(div, ops)),
-        ("图08_股价走势与分位.png",           fig_price(data_dir)),
-        ("图09_多框架目标价对比.png",         fig_targets(ops)),
-        ("图10_穿透回报率GGvsII.png",         fig_penetration(ops)),
-        ("图11_敏感性分析.png",               fig_sensitivity(ops)),
-        ("图12_盈利预测历史与三情景.png",     fig_forecast(ops)),
-        ("图13_PE估值带.png",                fig_pe_band(ops)),
-        ("图14_PB估值带.png",                fig_pb_band(ops)),
-        ("图15_杠杆与负债结构.png",           fig_leverage(ops)),
-        ("图16_行业成本与价格走势.png",       fig_industry_cost_price(ops, data_dir)),
-        ("图18_分部估值SOTP.png",            fig_sotp(ops)),
+        ("图01_营收与归母净利.png",          lambda: fig_revenue(pl_y) if pl_y is not None else None),
+        ("图02_ROE与BPS.png",               lambda: fig_roe_bps(fi_y) if fi_y is not None else None),
+        ("图03_分部营收构成与增速.png",       lambda: fig_segment(ops)),
+        ("图04_盈利能力趋势.png",             lambda: fig_profitability(ops)),
+        ("图05_现金流结构.png",               lambda: fig_cashflow(ops)),
+        ("图06_同行估值与增长对比.png",       lambda: fig_peers(ops)),
+        ("图07_DPS与支付率.png",             lambda: fig_dps(div, ops)),
+        ("图08_股价走势与分位.png",           lambda: fig_price(data_dir)),
+        ("图09_多框架目标价对比.png",         lambda: fig_targets(ops)),
+        ("图10_穿透回报率GGvsII.png",         lambda: fig_penetration(ops)),
+        ("图11_敏感性分析.png",               lambda: fig_sensitivity(ops)),
+        ("图12_盈利预测历史与三情景.png",     lambda: fig_forecast(ops)),
+        ("图13_PE估值带.png",                lambda: fig_pe_band(ops)),
+        ("图14_PB估值带.png",                lambda: fig_pb_band(ops)),
+        ("图15_杠杆与负债结构.png",           lambda: fig_leverage(ops)),
+        ("图16_行业成本与价格走势.png",       lambda: fig_industry_cost_price(ops, data_dir)),
+        ("图18_分部估值SOTP.png",            lambda: fig_sotp(ops)),
     ]
     # 图表豁免制（B4.2）：缺图必须声明，否则完整性门 FAIL（禁止静默跳过）
     exempt = {}
     ex_f = proj / "input" / "图表豁免.json"
-    if ex_f.exists():
-        try:
-            for e in json.loads(ex_f.read_text(encoding="utf-8")).get("豁免", []):
-                exempt[str(e.get("图", "")).split("_")[0]] = e.get("原因", "")
-        except Exception as exc:
-            p(f"[WARN] 读取 图表豁免.json 失败: {exc}")
+    try:
+        from chart_qc import _chart_exemptions
+        valid_exemptions = _chart_exemptions(proj)
+        if valid_exemptions:
+            for entry in json.loads(ex_f.read_text(encoding="utf-8-sig"))["豁免"]:
+                exempt[entry["图"].split("_")[0]] = entry["原因"]
+    except (OSError, ValueError) as exc:
+        p(f"[FAIL] 图表豁免配置无效: {exc}")
+        return 2
 
     made = skipped = 0
+    coverage = {}
     missing_required = []
     # SOTP 触发状态：平台型（input/sotp_触发.json enabled=true）→ 图18 强制；否则图18 可选不 FAIL
     sotp_trig = False
     try:
         _tf = proj / "input" / "sotp_触发.json"
         if _tf.exists():
-            sotp_trig = bool(json.loads(_tf.read_text(encoding="utf-8")).get("enabled"))
+            sotp_trig = json.loads(_tf.read_text(encoding="utf-8-sig")).get("enabled") is True
     except Exception:
         pass
-    for fname, fig in jobs:
+    for fname, factory in jobs:
+        prefix = fname.split("_")[0]
+        if prefix in exempt:
+            old_output = out_dir / fname
+            if old_output.exists():
+                p(f"[ERROR] {fname} 已豁免但有旧PNG；请明确移出后重跑，禁止把旧图视为本轮生成")
+                missing_required.append(fname)
+            else:
+                p(f"[SKIP-豁免] {fname}（{exempt[prefix]}）")
+            skipped += 1
+            continue
+        fig = factory()
         if fig is None:
             prefix = fname.split("_")[0]  # 图NN
             if prefix in exempt:
@@ -1337,7 +1597,30 @@ def main() -> int:
             skipped += 1
             continue
         save(fig, out_dir, fname)
+        prefix = fname.split("_")[0]
+        entry = {"file": fname, "png_sha256": hashlib.sha256((out_dir / fname).read_bytes()).hexdigest(),
+                 "latest_period": getattr(fig, "_latest_period", None),
+                 "basis": latest_pack.get("basis"), "is_forecast": False,
+                 "rendered_values": getattr(fig, "_latest_values", {})}
+        entry['integrated_original_axes'] = getattr(fig, '_integrated_latest', False)
+        entry['layout'] = {'axes_count':len(fig.axes),
+            'latest_tick_visible':any(str(latest_pack.get('latest_period',''))[:4] in t.get_text() and (getattr(fig,'_year_grouped',False) or '本期实际' in t.get_text()) for ax in fig.axes for t in ax.get_xticklabels()),
+            'grouped_by_year':getattr(fig,'_year_grouped',False),
+            'right_gutter_ratio':round(1-max(ax.get_position().x1 for ax in fig.axes),6)}
+        entry['layout'].update(getattr(fig, '_layout_audit', {}))
+        from financial_history_charts import growth_line_evidence
+        entry['growth_lines'] = growth_line_evidence(fig) if getattr(fig,'_year_grouped',False) else {}
+        entry['display_basis'] = getattr(fig, '_display_basis', None)
+        section = {"图03": "segment", "图06": "peers_period", "图07": "dps"}.get(prefix)
+        if section:
+            section_data = ops.get(section, {})
+            entry["period_review"] = section_data.get("period_review", {})
+        coverage[prefix] = entry
         made += 1
+    (proj / "reports" / "图表期间覆盖.json").write_text(json.dumps({
+        "schema_version": 1, "latest_statement_period": latest_pack.get("latest_period"),
+        "ops_sha256": hashlib.sha256(ops_f.read_bytes()).hexdigest() if ops_f.exists() else None,
+        "source_sha256": latest_pack.get("source_sha256", {}), "charts": coverage}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     p(f"\n[PNG] 生成 {made}/{len(jobs)} 张，跳过 {skipped} 张 -> {out_dir}")
     if made < 10:
         p("[WARN] 图表不足 10 张！请检查 ops JSON 补充运营数据，或标注行业不适用项")
@@ -1352,34 +1635,63 @@ def main() -> int:
     p("     python scripts/chart_qc.py --dir . --report reports/<报告名>.md [--no-map-check 历史项目]")
 
     # ---- Plotly 交互 HTML ----
+    if latest_pack.get('has_interim_income'):
+        from financial_history_charts import write_interactive
+        count = write_interactive(latest_pack,ops,html_out,f'{args.name or args.code}（{args.code}）年度与单季度图表｜实际截至{latest_pack["latest_period"]}')
+        p(f'[HTML] {html_out}（{count}个图组，年度/Q1—Q4/年度同比）')
+        return 0
     try:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
     except ImportError:
-        p("[WARN] 未安装 plotly，跳过 HTML")
-        return 0
+        p("[FAIL] 未安装 plotly，无法生成交互图表 HTML")
+        return 2
 
     panels = []
+    # The same original series contain the latest actuals in both output formats.
+    if latest_pack.get('basis') == 'YTD':
+        if pl_y is not None:
+            pl_y = extend_chart_input(pl_y, '图01', latest_pack)
+        if fi_y is not None:
+            fi_y = extend_chart_input(fi_y, '图02', latest_pack)
+    segment = ops.get("segment", {})
+    if segment.get("period_review", {}).get("period_end"):
+        for s in segment['series']:
+            panels.append(go.Bar(x=segment['labels'], y=s['values'], name=f"分部 {s['name']}（亿元；H1非全年）", marker_color='#4C72B0'))
     if pl_y is not None:
         rev_col = _col(pl_y, "OPERATE_INCOME", "营业总收入")
         np_col = _col(pl_y, "PARENT_NETPROFIT", "归母净利")
-        yrs = [r["REPORT_DATE"].strftime("%Y") for _, r in pl_y.iterrows()]
+        yrs = [r.get('_chart_label', r["REPORT_DATE"].strftime("%Y")) for _, r in pl_y.iterrows()]
         if rev_col:
             panels.append(go.Bar(x=yrs, y=[e8(r.get(rev_col)) for _, r in pl_y.iterrows()],
                                  name="营业总收入（亿元）", marker_color="#4C72B0"))
         if np_col:
-            panels.append(go.Scatter(x=yrs, y=[e8(r.get(np_col)) for _, r in pl_y.iterrows()],
+            profit_values = [e8(r.get(np_col)) for _, r in pl_y.iterrows()]
+            # Insert a missing connector within the original trace, preserving both periods.
+            profit_x = list(yrs)
+            if latest_pack.get('basis') == 'YTD':
+                profit_values.insert(-3, None); profit_x.insert(-3, '')
+            panels.append(go.Scatter(x=profit_x, y=profit_values,
                                      name="归母净利（亿元）", mode="lines+markers", line=dict(color="#C44E52", width=2.5)))
     if fi_y is not None:
         roe_col = _col(fi_y, "ROEJQ", "ROE")
         if roe_col:
-            yrs_fi = [r["REPORT_DATE"].strftime("%Y") for _, r in fi_y.iterrows()]
+            yrs_fi = [r.get('_chart_label', r["REPORT_DATE"].strftime("%Y")) for _, r in fi_y.iterrows()]
             panels.append(go.Bar(x=yrs_fi, y=[num(r.get(roe_col)) for _, r in fi_y.iterrows()],
                                  name="ROE（%）", marker_color="#55A868"))
+    for chart_id, section, series_keys in (
+        ('图04','profitability',('毛利率','净利率')),
+        ('图05','cashflow',('OCF','Capex','FCF')),
+        ('图15','leverage',('资产负债率','有息负债率','净现金'))):
+        integrated_ops = extend_chart_input(ops, chart_id, latest_pack) if latest_pack.get('basis') == 'YTD' else ops
+        d = integrated_ops.get(section, {})
+        for key in series_keys:
+            if key in d:
+                panels.append(go.Bar(x=d['labels'], y=d[key], name=f'{chart_id} {key}（末两列为累计实际/期末值）'))
     ind = ops.get("industry_cost_price")
     if ind:
         for s in ind.get("series", []):
-            panels.append(go.Scatter(x=ind["labels"], y=s["values"], name=f"图16 {s['name']}（指数）", mode="lines+markers"))
+            panels.append(go.Scatter(x=ind["labels"], y=s.get("raw_values") or s["values"], name=f"图16 {s['name']}（{s.get('unit', '原始值')}）", mode="lines+markers"))
     px_df = load_csv(data_dir, "日线股价_前复权.csv")
     if px_df is None:
         px_df = load_csv(data_dir, "日线股价.csv")
@@ -1391,9 +1703,9 @@ def main() -> int:
                                      line=dict(width=1.2, color="#4C72B0")))
     pen = ops.get("penetration")
     if pen:
-        panels.append(go.Bar(x=pen["labels"], y=pen["gg"], name="GG（%）",
+        panels.append(go.Bar(x=pen["labels"], y=pen["gg"], name="回报率（%）",
                              marker_color=["#C44E52","#55A868","#DD8452"][:len(pen["gg"])],
-                             text=[f"{v:.2f}%" for v in pen["gg"]], textposition="outside"))
+                             text=[f"{format_number(v)}%" for v in pen["gg"]], textposition="outside"))
     sens = ops.get("sensitivity")
     if sens:
         for s in sens["系列"]:
@@ -1405,11 +1717,12 @@ def main() -> int:
             fig.add_trace(tr, row=i//2+1, col=i%2+1)
         title_text = f"{args.name or args.code}（{args.code}）交互图表合集 ｜ {SRC}"
         fig.update_layout(title=dict(text=title_text, font=dict(size=16)), height=420*rows,
-                          showlegend=True, template="plotly_white")
-        fig.write_html(html_out, include_plotlyjs="cdn")
-        p(f"[HTML] {html_out}（{html_out.stat().st_size/1024:.0f} KB）")
+                          showlegend=False, template="plotly_white", margin=dict(l=65,r=35,t=110,b=65))
+        fig.write_html(html_out, include_plotlyjs=True)
+        p(f"[HTML] {html_out}（{format_number(html_out.stat().st_size/1024)} KB）")
     else:
-        p("[WARN] 无可用数据，跳过 HTML")
+        p("[FAIL] 无可用数据，无法生成交互图表 HTML")
+        return 2
     return 0
 
 
