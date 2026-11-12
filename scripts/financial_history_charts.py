@@ -23,6 +23,9 @@ from matplotlib.transforms import Bbox
 from matplotlib.text import Text
 from matplotlib.ticker import FuncFormatter, MaxNLocator, MultipleLocator
 
+plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'PingFang SC', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+
 from chart_periods import CHART_METRICS, NAMES, RATIOS, STOCKS, chart_values, annual_growth
 from chart_numbers import format_number,valid_number_label,MAX_LABEL_DECIMALS,figure_number_audit,normalize_figure_numbers
 
@@ -118,7 +121,7 @@ def layout_history(fig):
         previous_positions=[ax.get_position().bounds for ax in mains]
         fig.canvas.draw()
         renderer=fig.canvas.get_renderer(); fw,fh=fig.bbox.width,fig.bbox.height
-        pt=fig.dpi/72; edge=10*pt; gap=10*pt
+        pt=fig.dpi/72; edge=14*pt; gap=20*pt
         if fig._suptitle:
             fig._suptitle.set_position((.5,1-edge/fh))
             fig._suptitle.set_va('top')
@@ -126,14 +129,14 @@ def layout_history(fig):
         title_bottom=fig._suptitle.get_window_extent(renderer).y0 if fig._suptitle else fh-edge
         legend=fig.legends[0]
         while True:
-            legend.set_bbox_to_anchor((.5,(title_bottom-5*pt)/fh),transform=fig.transFigure)
+            legend.set_bbox_to_anchor((.5,(title_bottom-6*pt)/fh),transform=fig.transFigure)
             fig.canvas.draw(); renderer=fig.canvas.get_renderer()
             if legend.get_window_extent(renderer).width<=fw-2*edge or fig._legend_columns==1:
                 break
             fig._legend_columns-=1; legend.remove()
             legend=fig.legend(handles=fig._legend_handles,loc='upper center',
                               ncol=fig._legend_columns,frameon=False,fontsize=8.5,
-                              borderaxespad=0,columnspacing=1.1,handletextpad=.6)
+                              borderaxespad=0,columnspacing=1.6,handletextpad=.8)
         content_top=legend.get_window_extent(renderer).y0-gap
         footer=fig._history_footer
         footer.set_position((.5,edge/fh))
@@ -143,7 +146,7 @@ def layout_history(fig):
         groups=[]; overhangs=[]
         for ax in mains:
             width=ax.get_position().width*fw
-            ax.set_title(_wrap_measured(ax._history_title,renderer,width,10.5),loc='left',fontsize=10.5,fontweight='bold',pad=6)
+            ax.set_title(_wrap_measured(ax._history_title,renderer,width,10.5),loc='left',fontsize=10.5,fontweight='bold',pad=12)
             pair=[ax,ax._history_twin]; groups.append(pair)
         fig.canvas.draw(); renderer=fig.canvas.get_renderer()
         for pair in groups:
@@ -151,7 +154,7 @@ def layout_history(fig):
             box=Bbox.union([a.get_tightbbox(renderer) for a in pair])
             overhangs.append((plot.x0-box.x0,box.x1-plot.x1,box.y1-plot.y1,plot.y0-box.y0))
         height=(content_top-content_bottom-(len(groups)-1)*gap-sum(v[2]+v[3] for v in overhangs))/len(groups)
-        minimum=135*pt
+        minimum=180*pt
         if height<minimum:
             fig.set_size_inches(fig.get_figwidth(),(fh+(minimum-height)*len(groups))/fig.dpi,forward=True)
             continue
@@ -225,7 +228,8 @@ def layout_native(fig):
         if handles:
             fig._native_legend_handles=handles
             fig._native_legend_columns=len(handles)
-            fig.legend(handles,labels,loc='upper center',ncol=len(handles),frameon=False,fontsize=8.5,borderaxespad=0)
+            fig.legend(handles,labels,loc='upper center',ncol=len(handles),frameon=False,fontsize=8.5,
+                       borderaxespad=0,columnspacing=1.6,handletextpad=0.8)
         fig._native_legends_ready=True
     if fig._suptitle:
         fig._suptitle.set_in_layout(False)
@@ -243,7 +247,7 @@ def layout_native(fig):
         subtitle.set_in_layout(False)
     for _ in range(2):
         fig.canvas.draw(); renderer=fig.canvas.get_renderer(); fw,fh=fig.bbox.width,fig.bbox.height
-        pt=fig.dpi/72; edge=10*pt; gap=10*pt
+        pt=fig.dpi/72; edge=12*pt; gap=16*pt
         top=fh-edge
         if fig._suptitle:
             title=fig._suptitle
@@ -267,7 +271,7 @@ def layout_native(fig):
                     break
                 fig._native_legend_columns-=1; legend.remove()
                 legend=fig.legend(handles=fig._native_legend_handles,loc='upper center',ncol=fig._native_legend_columns,
-                                  frameon=False,fontsize=8.5,borderaxespad=0)
+                                  frameon=False,fontsize=8.5,borderaxespad=0,columnspacing=1.6,handletextpad=0.8)
             top=legend.get_window_extent(renderer).y0-gap
         bottom=edge
         if hasattr(fig,'_native_footer'):
@@ -419,7 +423,7 @@ def growth_line_evidence(fig):
             lines.append({'label':line.get_label(),
                           'years':[years[int(x)] if x.is_integer() and 0<=x<len(years) else None for x in points],
                           'values':[float(v) if v is not None and math.isfinite(float(v)) else None for v in line.get_ydata()],
-                          'unit':'pp' if key in RATIOS else 'percent'})
+                          'unit':'pp' if key in RATIOS else '亿元' if key == 'net_cash' else 'percent'})
         metrics[key]=lines
     return {'policy':'annual_yoy_only','metrics':metrics,
             'legend_labels':[t.get_text() for legend in fig.legends for t in legend.get_texts()]}
@@ -438,7 +442,7 @@ def growth_line_failures(pack,chart_id,evidence,ops=None):
         if chart_id=='图12':
             years=years+[int(str(y).rstrip('E')) for y in (ops or {}).get('forecast',{}).get('labels_fcast',[]) if int(str(y).rstrip('E')) not in years]
         expected={'label':'年度同比','years':years,'values':annual_growth(pack,key,years),
-                  'unit':'pp' if key in RATIOS else 'percent'}
+                  'unit':'pp' if key in RATIOS else '亿元' if key == 'net_cash' else 'percent'}
         lines=evidence.get('metrics',{}).get(key,[])
         if len(lines)!=1:
             failures.append(f'{key}必须只有一条年度同比增长线')
@@ -454,16 +458,32 @@ def growth_line_failures(pack,chart_id,evidence,ops=None):
 
 
 def format_growth_axis(ax):
-    """Keep small annual changes readable without duplicate rounded tick labels."""
-    lower,upper=ax.get_ylim()
-    if upper-lower < .06:
-        lower=math.floor(lower*100)/100
-        upper=math.ceil(upper*100)/100
-        ax.set_ylim(lower,max(upper,lower+.01))
+    """Keep small annual changes readable without duplicate rounded tick labels.
+
+    纵向缩减折线波动跨度：增加上下留白缓冲（约 40%~45%），避免折线顶天立地，
+    使折线在图表面板中间区域优雅波动，与柱状图更具协调性与呼吸感。
+    """
+    lower, upper = ax.get_ylim()
+    span = upper - lower
+    if upper > 500 or (upper - lower) > 800:
+        # 极值保护：避免极端离群同比（如+3798%）导致常规变动区间被压扁
+        ax.set_yscale('symlog', linthresh=100)
+        new_top = upper * 2.5 if upper > 0 else upper
+        new_bot = lower * 1.5 if lower < 0 else lower - 50
+        ax.set_ylim(new_bot, new_top)
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda value,_: format_number(0 if abs(value)<1e-10 else value)))
+    elif span < .06:
+        lower = math.floor(lower * 100) / 100
+        upper = math.ceil(upper * 100) / 100
+        pad = max((upper - lower) * 0.45, 0.02)
+        ax.set_ylim(lower - pad, max(upper + pad, lower + .01))
         ax.yaxis.set_major_locator(MultipleLocator(.01))
     else:
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=6,steps=[1,2,5,10]))
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda value,_:format_number(0 if abs(value)<1e-10 else value)))
+        # 常规线性比例：向上下各扩展 45% 的缓冲空间，将折线纵向跨度压缩至绘图区约 50% 高度
+        pad = span * 0.45
+        ax.set_ylim(lower - pad, upper + pad)
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=6, steps=[1, 2, 5, 10]))
+        ax.yaxis.set_major_formatter(FuncFormatter(lambda value,_: format_number(0 if abs(value)<1e-10 else value)))
 
 
 def number_unit(key):
@@ -479,8 +499,8 @@ def metric_name(key):
 def fig_history(pack, chart_id, ops=None):
     keys = CHART_METRICS[chart_id]
     year_count=len({r['period'][:4] for r in pack['history']})
-    width=min(17,max(10,3+.75*year_count))
-    fig, axes = plt.subplots(len(keys),1,figsize=(width,max(5.4,3.9*len(keys))),squeeze=False)
+    width=min(18,max(11,4.0+.88*year_count))
+    fig, axes = plt.subplots(len(keys),1,figsize=(width,max(6.8,4.8*len(keys))),squeeze=False)
     actual_values, artists, all_series = {}, {}, {}
     for index,key in enumerate(keys):
         ax = axes[index,0]
@@ -506,10 +526,10 @@ def fig_history(pack, chart_id, ops=None):
             if val is None:
                 continue
             text=ax.annotate(format_number(val/divisor),(bar.get_x()+bar.get_width()/2,val/divisor),
-                             xytext=(0,9 if val>=0 else -9),textcoords='offset points',ha='center',
-                             va='bottom' if val>=0 else 'top',fontsize=8.5,fontweight='bold',color='#273A58',
-                             bbox=dict(facecolor='white',edgecolor='none',alpha=.85,pad=1),
-                             arrowprops=dict(arrowstyle='-',color='#A8AFBB',linewidth=.35))
+                             xytext=(0,8 if val>=0 else -8),textcoords='offset points',ha='center',
+                             va='bottom' if val>=0 else 'top',fontsize=8.5,fontweight='bold',color='#1e293b',
+                             bbox=dict(boxstyle='round,pad=0.2',facecolor='white',edgecolor='#94a3b8',alpha=.92,linewidth=.5),
+                             arrowprops=dict(arrowstyle='-',color='#94a3b8',linewidth=.4))
             text._bar_value_label=True; text._annual_label=True; text._initial_offset=text.get_position()
             text._bar_label_value=val/divisor
         rendered = {}
@@ -523,30 +543,51 @@ def fig_history(pack, chart_id, ops=None):
                 if val is not None:
                     text=ax.annotate(format_number(val/divisor),(p.get_x()+p.get_width()/2,val/divisor),
                                      xytext=(0,3 if val>=0 else -3),textcoords='offset points',ha='center',
-                                     va='bottom' if val>=0 else 'top',fontsize=6.2,color=COLORS[k],
-                                     bbox=dict(facecolor='white',edgecolor='none',alpha=.84,pad=.5),
+                                     va='bottom' if val>=0 else 'top',fontsize=6.0,color=COLORS[k],
+                                     bbox=dict(facecolor='white',edgecolor='none',alpha=.88,pad=.2),
                                      arrowprops=dict(arrowstyle='-',color='#B1B8C3',linewidth=.3))
                     text._bar_value_label=True; text._annual_label=False; text._initial_offset=text.get_position()
                     text._bar_label_value=val/divisor
         ax.axhline(0,color='#BFC5CD',linewidth=.7)
-        ax.grid(axis='y',color='#E6E9EF',linestyle=':',linewidth=.7)
+        ax.grid(axis='y',color='#F1F5F9',linestyle='-',linewidth=.8)
         ax.set_axisbelow(True)
-        ax.set_ylabel(f'{metric_name(key)}（{unit}）',fontsize=10)
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        ax.spines['left'].set_color('#E2E8F0')
+        ax.spines['bottom'].set_color('#CBD5E1')
+        ax.set_ylabel(f'{metric_name(key)}（{unit}）',fontsize=9.8,labelpad=12)
         ax.set_xticks(x,[str(y) for y in years],fontsize=9)
+        ax.tick_params(axis='x', pad=7, labelsize=8.8)
+        ax.tick_params(axis='y', pad=7, labelsize=8.5)
         ax.set_xlim(-.65,len(years)-.35)
         for i,year in enumerate(years):
             if d['annual'][i] is None and all(seq[i] is None for seq in d['quarters']):
                 ax.text(i,.03,'未披露',transform=ax.get_xaxis_transform(),ha='center',fontsize=7,color='#8A9099')
         if forecast:
+            hist_anchor_year = None
+            for y in reversed(years):
+                if y < min(future_years):
+                    idx = years.index(y)
+                    if d['annual'][idx] is not None:
+                        hist_anchor_year = y
+                        break
+            anchor_x = [years.index(hist_anchor_year)] if hist_anchor_year is not None else []
+            anchor_val = d['annual'][years.index(hist_anchor_year)] / divisor if hist_anchor_year is not None else None
             for name,color,style in (('悲观','#C44E52','--'),('基准','#4C72B0','-'),('乐观','#55A868','-.')):
                 if name in forecast:
-                    ax.plot([years.index(y) for y in future_years],forecast[name],marker='D',color=color,linestyle=style,linewidth=1.8,label=name+'全年预测')
-        ax.margins(y=.20)
+                    x_pts = anchor_x + [years.index(y) for y in future_years]
+                    y_pts = ([anchor_val] if anchor_val is not None else []) + list(forecast[name])
+                    ax.plot(x_pts, y_pts, marker='D', color=color, linestyle=style, linewidth=1.8, label=name+'全年预测')
+        ax.margins(y=.28)
         right = ax.twinx()
         ax._history_twin=right
+        right.spines['top'].set_visible(False)
+        right.spines['left'].set_visible(False)
+        right.spines['right'].set_color('#E2E8F0')
+        right.spines['bottom'].set_color('#CBD5E1')
         right.plot(x,d['annual_yoy'],color='#D78A16',marker='o',markersize=3,linewidth=1.6,label='年度同比')
-        right.set_ylabel('年度变动（百分点）' if key in RATIOS else '年度同比（%）',fontsize=9,color='#806634')
-        right.tick_params(axis='y',labelsize=8)
+        right.set_ylabel('年度变动（百分点）' if key in RATIOS else '年度净变动（亿元）' if key == 'net_cash' else '年度同比（%）',fontsize=9,color='#806634',labelpad=12)
+        right.tick_params(axis='y',labelsize=8.5,pad=7)
         right.axhline(0,color='#D6CDBA',linewidth=.5,linestyle='--')
         format_growth_axis(right)
         for label in right.get_yticklabels():
@@ -554,7 +595,7 @@ def fig_history(pack, chart_id, ops=None):
         latest_value=pack['quarter_comparisons'][-1]['values'].get(key)
         formatted='未披露' if latest_value is None else f'{format_number(latest_value/divisor)}{unit}'
         ax._history_title=f"{metric_name(key)}\n最新{pack['quarter_comparisons'][-1]['label']}：{formatted}"
-        ax.set_title(ax._history_title,loc='left',fontsize=10.5,fontweight='bold',pad=9)
+        ax.set_title(ax._history_title,loc='left',fontsize=10.5,fontweight='bold',pad=12)
         # The current year is highlighted; no fictitious annual/YTD-as-FY bar.
         latest_index = years.index(int(pack['latest_period'][:4]))
         ax.axvspan(latest_index-.45,latest_index+.45,color='#FFF1D8',alpha=.40,zorder=0)
@@ -569,7 +610,7 @@ def fig_history(pack, chart_id, ops=None):
     fig._legend_columns=len(handles)
     fig.legend(handles=handles,loc='upper center',bbox_to_anchor=(.5,.967),ncol=fig._legend_columns,frameon=False,fontsize=8.5,borderaxespad=0,columnspacing=1.1,handletextpad=.6)
     fig.subplots_adjust(left=.10,right=.90,top=.87,bottom=.10,hspace=.55)
-    footer=f"来源：原始三表；最新实际{pack['latest_period']}。橙线仅为相邻完整年度同比，率类为年度变动（百分点）；未完年不画年度同比点。\n负基数/跨零或基期缺失留空。年度与季度同年分组；流量为单季，资产类为期末，季度ROE为累计、未年化。\n数字最多{MAX_LABEL_DECIMALS}位小数；极小非零值用<0.01或>-0.01表示（单位同轴），原始计算不舍入。"
+    footer=f"来源：原始三表；最新实际{pack['latest_period']}。橙线仅为相邻完整年度同比，率类/净额类为年度变动（百分点/亿元）；未完年不画年度同比点。\n流量为单季，资产类为期末，季度ROE为累计、未年化；负基数或跨零变动率按|(current-prior)/prior|方向计量。\n数字最多{MAX_LABEL_DECIMALS}位小数；极小非零值用<0.01或>-0.01表示（单位同轴），原始计算不舍入。"
     fig._history_footer_text=footer
     fig._history_footer=fig.text(.5,.012,footer,ha='center',va='bottom',fontsize=8,color='#6B7280')
     fig._latest_period = pack['latest_period']

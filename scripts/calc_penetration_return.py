@@ -27,6 +27,7 @@
     aa_2y（真实可支配现金，默认口径） / aa_all（可选，5年均值对比）
     rf / cycle_adjust_pct（弱周期=0）
     lambda（经营杠杆，可省略：提供 surplus_series+revenue_series 时自动计算）
+    lambda_policy=historical_mean_reference：保留历史逐段斜率均值及低可靠性诊断，不以0替代不稳定估计
     base_revenue / surplus_series（由新到旧，可选）/ revenue_series（可选）
     cash_balance（货币资金，未扣债）/ net_debt（有息负债−货币资金，校验字段）/ interest_bearing_debt / ebitda（可选）/ fcf（可选）
     goodwill / total_assets（可选）/ dps / working_capital / book_equity（普通股权益，可选）
@@ -55,6 +56,41 @@ def fmt2(x) -> str:
 def pct2(x: float) -> str:
     '''带正负号、保留2位的百分点文本'''
     return '{:+.2f} pct'.format(x * 100)
+
+
+def diagnose_lambda(cfg: dict) -> dict:
+    """Keep the historical estimate separate from its reliability assessment."""
+    surplus = cfg.get('surplus_series') or []
+    revenues = cfg.get('revenue_series') or []
+    years = cfg.get('financial_years') or []
+    intervals, reasons = [], []
+    if len(surplus) < 2 or len(surplus) != len(revenues):
+        reasons.append('历史结余与收入配对不足')
+    else:
+        for index in range(len(surplus) - 1):
+            values = (surplus[index], surplus[index + 1], revenues[index], revenues[index + 1])
+            if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in values):
+                reasons.append('历史配对包含缺失或非有限值')
+                continue
+            delta_revenue = revenues[index] - revenues[index + 1]
+            if delta_revenue == 0:
+                reasons.append('相邻年度收入差为0')
+                continue
+            slope = (surplus[index] - surplus[index + 1]) / delta_revenue
+            interval = {'index': index, 'slope': slope}
+            if len(years) == len(surplus):
+                interval['period'] = f'{years[index]}/{years[index + 1]}'
+            intervals.append(interval)
+    slopes = [row['slope'] for row in intervals]
+    raw_mean = math.fsum(slopes) / len(slopes) if slopes else None
+    signs = {1 if value > 0 else -1 for value in slopes if value != 0}
+    if len(signs) > 1:
+        reasons.append('逐段斜率正负混合')
+    if any(abs(value) > 1.5 for value in slopes):
+        reasons.append('单段斜率绝对值大于1.5')
+    return {'method': 'mean_of_adjacent_annual_slopes', 'raw_mean': raw_mean,
+            'intervals': intervals, 'reliable': bool(slopes) and not reasons,
+            'reasons': list(dict.fromkeys(reasons))}
 
 
 def compute(cfg: dict) -> dict:
@@ -157,11 +193,21 @@ def compute(cfg: dict) -> dict:
         }
 
     # --- 经营杠杆 λ ---
+    lambda_policy = cfg.get('lambda_policy', 'legacy_zero')
+    if lambda_policy not in ('legacy_zero', 'historical_mean_reference'):
+        raise ValueError('未知lambda_policy')
+    lambda_diagnostics = diagnose_lambda(cfg)
     lam = cfg.get('lambda')
     lam_warn = ''
-    if lam is not None and lam == 0:
+    if lambda_policy == 'historical_mean_reference':
+        if lambda_diagnostics['raw_mean'] is None:
+            raise ValueError('历史λ参考模式缺少可比收入/结余数据，不得填0')
+        lam = lambda_diagnostics['raw_mean']
+        lambda_reliable = lambda_diagnostics['reliable'] and cfg.get('lambda_reliable', True) is not False
+        lam_warn = '' if lambda_reliable else '历史λ均值仅供条件敏感性参考，可靠性低；不用于盈利预测，k*不输出'
+    elif lam is not None and lam == 0:
         lam_warn = '⚠️ λ=0 兜底，结余敏感性不随收入变化；k*无定义'
-    if lam is None:
+    if lambda_policy == 'legacy_zero' and lam is None:
         surv = cfg.get('surplus_series') or []
         revs = cfg.get('revenue_series') or []
         if len(surv) >= 2 and len(revs) == len(surv):
@@ -188,6 +234,13 @@ def compute(cfg: dict) -> dict:
             lam = 0.0
             lam_warn = '⚠️ λ数据不足，按0兜底；k*无定义'
 
+    if lambda_policy == 'legacy_zero':
+        lambda_reliable = bool(cfg.get('lambda_reliable', lam != 0))
+        if not lambda_reliable and lam != 0:
+            lam_warn = '显式λ可靠性低，仅供条件敏感性参考；k*不输出'
+    if lam_warn and lam_warn not in warnings:
+        warnings.append(lam_warn)
+
     # --- 敏感性表 ---
     single = []
     for kk in (1.0, 0.9, 0.8, 0.7):
@@ -196,6 +249,7 @@ def compute(cfg: dict) -> dict:
         single.append({
             'k': kk, 'surplus': surplus, 'gg': gg,
             'margin': gg - II, 'floor': (price * II / gg) if (gg or 0) > 0 else None,
+            'target_buy': price * gg / II,
         })
     cumulative = []
     for n in (1, 2, 3):
@@ -205,6 +259,7 @@ def compute(cfg: dict) -> dict:
         cumulative.append({
             'k': kk, 'surplus': surplus, 'gg': gg,
             'margin': gg - II, 'floor': (price * II / gg) if (gg or 0) > 0 else None,
+            'target_buy': price * gg / II,
         })
 
     # --- G 敏感性网格（维持性Capex系数 G）---
@@ -223,7 +278,7 @@ def compute(cfg: dict) -> dict:
 
     # 临界收入倍数 k*：GG(k*) = II
     k_star = None
-    if lam != 0 and revenue and M > 0:
+    if lambda_reliable and lam != 0 and revenue and M > 0:
         k_star = 1 - (aa - II * market_cap / M) / (lam * revenue)
 
     # --- 绝对估值 ---
@@ -231,19 +286,22 @@ def compute(cfg: dict) -> dict:
     ebitda = cfg.get('ebitda')
     fcf = cfg.get('fcf')
     book_equity = cfg.get('book_equity')
+    quote_fx = cfg.get('quote_fx', 1.0)  # statement currency per one quote currency
+    if not isinstance(quote_fx, (int, float)) or not math.isfinite(quote_fx) or quote_fx <= 0:
+        raise ValueError('quote_fx 必须是有效正汇率')
     anchors = []
     anchor_names = []
     protection = cfg.get('cash_protection')
     if protection is not None:
         if cfg.get('cash_protection_verified') is True and cfg.get('cash_protection_source') and protection > 0:
-            anchors.append(protection/shares)
+            anchors.append(protection/shares/quote_fx)
             anchor_names.append('经核实现金保护/股')
         else:
             warnings.append('现金保护锚未核实或非正，已剔除')
     if cfg.get('net_current_assets') is not None:
         warnings.append('旧net_current_assets为营运资本，不作为现金保护锚；请核实后显式填cash_protection')
     if book_equity is not None and book_equity > 0:
-        anchors.append(book_equity / shares)
+        anchors.append(book_equity / shares / quote_fx)
         anchor_names.append('每股净资产')
     if cfg.get('low_10y_close') is not None:
         if cfg.get('low_10y_close_verified') is True and cfg.get('low_10y_close_source') and cfg['low_10y_close']>0:
@@ -258,7 +316,12 @@ def compute(cfg: dict) -> dict:
     trap_cash = False
     surv = cfg.get('surplus_series') or []
     if len(surv) >= 3:
-        declines = [surv[i] < surv[i + 1] * 0.85 for i in range(len(surv) - 1)]
+        valid = [isinstance(value, (int, float)) and not isinstance(value, bool)
+                 and math.isfinite(value) for value in surv]
+        if not all(valid):
+            warnings.append('现金结余历史含缺失值，连续下滑检查仅覆盖有效相邻年度，不能排除现金流陷阱')
+        declines = [valid[i] and valid[i + 1] and surv[i] < surv[i + 1] * 0.85
+                    for i in range(len(surv) - 1)]
         streak = 0
         for d in declines:
             streak = streak + 1 if d else 0
@@ -274,6 +337,8 @@ def compute(cfg: dict) -> dict:
         'II': II, 'JJ': JJ, 'KK': KK,
         'target_buy': target_buy, 'floor_price': floor_price,
         'lambda': lam, 'lambda_warning': lam_warn,
+        'lambda_policy': lambda_policy, 'lambda_reliable': lambda_reliable,
+        'lambda_diagnostics': lambda_diagnostics,
         'single_year': single, 'cumulative': cumulative,
         'k_star': k_star,
         'EV': EV, 'cash_balance': cash, 'net_debt': net_debt, 'net_cash_actual': -net_debt if net_debt is not None else None,
@@ -308,7 +373,7 @@ def render(o: dict, show_grid: bool = True) -> str:
     L.append(' 现金校验偏差 Δc = {}   （≥2pct → 降级为 GG；当前有效口径：{}）'.format(pct2(o['cash_dev']), o['primary']))
     L.append(' 账面口径 R = {}   （C×M/市值，交叉校验）'.format(pct(o['R'])))
     L.append(' 账面-现金偏差 HH = {}   （|HH|≥2pct 需专项调查）'.format(pct2(o['HH'])))
-    L.append(' 门槛 II = {}   （max(3.5%, Rf+2%)）'.format(pct(o['II'])))
+    L.append(' 门槛 II = {}   （按输入的市场下限与Rf加成配置）'.format(pct(o['II'])))
     L.append(' 安全边际 KK = {}   （JJ={}，基于主口径，含周期修正）'.format(pct2(o['KK']), pct2(o['JJ'])))
     L.append(' 目标买入价 = {} 元   ｜ 门槛价格 = {} 元   （口径：{}）'.format(fmt2(o['target_buy']), fmt2(o['floor_price']), o['primary']))
     gc = o.get('growth_calib') or {}
@@ -325,6 +390,8 @@ def render(o: dict, show_grid: bool = True) -> str:
         L.append(' 成长验证买入区 = [{:.2f}, {:.2f}] 元（保守轨下限 ~ 成长校准轨上限）｜ 升级：{}'.format(
             o['target_buy'], gc['target_buy_fwd'], ver))
     L.append(' 经营杠杆 λ = {:.4f}  {}'.format(o['lambda'], o['lambda_warning']))
+    if not o.get('lambda_reliable', True):
+        L.append(' λ低可靠性：情景是给定系数的条件演算，不代表已识别收入与现金的因果关系。')
     L.append('')
     L.append('── 单年下滑情景（现金结余口径 GG(k)=AA(k)×M/市值，校验维度）──')
     L.append('  情景    结余(亿元/万元，逐项标注)   GG(k)    vs门槛    门槛价格')

@@ -58,6 +58,8 @@ def parse_prompt(prompt: str) -> tuple[str | None, str | None]:
 
 
 def infer_market(code: str) -> str:
+    if len(code) == 5 and code.isdigit():
+        return "HK"
     if code.startswith(("4", "8", "92")):
         return "BJ"
     if code.startswith(("6", "9")):
@@ -218,7 +220,14 @@ def audit_data(data_dir: Path) -> tuple[list[dict], str]:
     bs = load("资产负债表_按报告期.csv")
     inc = load("利润表_按报告期.csv")
     cf = load("现金流量表_按报告期.csv")
-    ind_q = load("主要财务指标_按单季度.csv")
+    # HK providers expose cumulative indicators only; do not manufacture a
+    # quarterly table or make an unavailable optional endpoint a hard failure.
+    hk = data_dir.parent.parent.name.startswith("HK.")
+    if hk and not (data_dir / "主要财务指标_按单季度.csv").exists():
+        ind_q = None
+        add("港股单季度指标", "⚠️", "源未提供独立单季度指标；流量按三表累计差分，率类不作差分")
+    else:
+        ind_q = load("主要财务指标_按单季度.csv")
     ind_a = load("主要财务指标_按报告期.csv")
 
     for label, df in [("资产负债表", bs), ("利润表", inc), ("现金流量表", cf),
@@ -249,12 +258,13 @@ def audit_data(data_dir: Path) -> tuple[list[dict], str]:
         eq_col = find_col(bs, "TOTAL_PARENT_EQUITY") or find_col(bs, "归母权益")
         ni_col = find_col(inc, "PARENT_NETPROFIT") or find_col(inc, "归母净利润")
         bps_col = find_col(ind_a, "BPS") or find_col(ind_a, "每股净资产")
-        eps_col = find_col(ind_a, "EPSJB") or find_col(ind_a, "基本每股收益")
+        eps_col = find_col(ind_a, "EPSJB") or find_col(ind_a, "BASIC_EPS") or find_col(ind_a, "基本每股收益")
         if eq_col and ni_col and bps_col:
             bs_d = bs[[find_col(bs, "REPORT", "DATE") or "REPORT_DATE", eq_col]].dropna()
             inc_d = inc[[find_col(inc, "REPORT", "DATE") or "REPORT_DATE", ni_col]].dropna()
-            ind_d = ind_a[[find_col(ind_a, "REPORT", "DATE") or "REPORT_DATE",
-                           bps_col, eps_col or bps_col]].dropna()
+            indicator_columns = list(dict.fromkeys([find_col(ind_a, "REPORT", "DATE") or "REPORT_DATE",
+                           bps_col, eps_col or bps_col]))
+            ind_d = ind_a[indicator_columns].dropna()
             # 对齐最新年报
             def annual(d, col):
                 d = d.copy()
@@ -819,7 +829,10 @@ def main() -> int:
     # B1 解析
     company, code = args.company, args.code
     if args.prompt:
-        company, code = parse_prompt(args.prompt)
+        parsed_company, parsed_code = parse_prompt(args.prompt)
+        company, code = company or parsed_company, code or parsed_code
+    if code and code.upper().endswith(".HK"):
+        code = code[:-3].zfill(5)
 
     if args.data_dir and args.audit_only:
         data_dir = Path(args.data_dir)

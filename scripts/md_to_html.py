@@ -28,32 +28,75 @@ from pathlib import Path
 CSS = r"""
 :root { color-scheme: light; }
 html { background: #fff; }
+#title-block-header { display: none; }
 body {
-  max-width: 980px;
+  max-width: 1020px;
   margin: 0 auto;
-  padding: 42px 54px 72px;
-  color: #172033;
+  padding: 48px 60px 84px;
+  color: #1e293b;
   background: #fff;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   font-size: 15px;
-  line-height: 1.72;
+  line-height: 1.8;
   overflow-wrap: break-word;
 }
-h1 { font-size: 30px; margin: 0 0 18px; color: #10203a; }
-h2 { font-size: 22px; margin: 42px 0 14px; padding-bottom: 7px; border-bottom: 1px solid #dfe5ec; color: #12233e; }
-h3 { font-size: 18px; margin: 28px 0 10px; color: #1b2b43; }
-h4 { font-size: 16px; margin: 22px 0 8px; color: #24364f; }
-p, ul, ol, blockquote, table, figure { margin: 12px 0; }
-blockquote { padding: 9px 16px; border-left: 4px solid #9db7d7; background: #f3f6fa; color: #40536b; }
-table { width: 100%; border-collapse: collapse; font-size: 14px; }
-th, td { border: 1px solid #d9e0e8; padding: 8px 10px; vertical-align: top; }
-th { background: #f1f4f7; color: #1b2b43; font-weight: 650; }
-tr:nth-child(even) td { background: #fbfcfd; }
-img { display: block; max-width: 100%; height: auto; margin: 18px auto; }
-code { padding: 1px 4px; border-radius: 3px; background: #f1f3f5; color: #9b3d2f; }
-pre { padding: 14px; overflow-x: auto; background: #f4f6f8; border: 1px solid #e0e5eb; }
-a { color: #1c5b99; }
-hr { border: 0; border-top: 1px solid #dfe5ec; margin: 28px 0; }
+h1 { font-size: 30px; margin: 0 0 24px; color: #0f172a; font-weight: 700; }
+h2 { font-size: 23px; margin: 52px 0 20px; padding-bottom: 9px; border-bottom: 1px solid #e2e8f0; color: #0f172a; font-weight: 700; }
+h3 { font-size: 18.5px; margin: 38px 0 16px; color: #1e293b; font-weight: 650; }
+h4 { font-size: 16px; margin: 28px 0 12px; color: #334155; font-weight: 600; }
+p, ul, ol, blockquote, figure { margin: 18px 0; }
+blockquote { padding: 12px 20px; border-left: 4px solid #3b82f6; background: #f8fafc; color: #334155; border-radius: 0 6px 6px 0; font-size: 14.5px; }
+table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  margin: 32px 0 28px;
+  font-size: 13.5px;
+  line-height: 1.6;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+th, td {
+  padding: 12px 18px;
+  border-top: 1px solid #edf2f7;
+  border-left: 1px solid #edf2f7;
+  vertical-align: middle;
+}
+th:first-child, td:first-child {
+  border-left: none;
+}
+tr:first-child th {
+  border-top: none;
+}
+th {
+  background: #f8fafc;
+  color: #1e293b;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+tr:nth-child(even) td {
+  background: #fcfdfe;
+}
+tr:hover td {
+  background: #f8fafc;
+}
+img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 34px auto 26px;
+  border-radius: 6px;
+  border: 1px solid #f1f5f9;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+}
+code { padding: 2px 5px; border-radius: 4px; background: #f1f5f9; color: #be123c; font-size: 13.5px; }
+pre { padding: 16px; overflow-x: auto; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; }
+a { color: #2563eb; text-decoration: none; }
+a:hover { text-decoration: underline; }
+hr { border: 0; border-top: 1px solid #e2e8f0; margin: 36px 0; }
 @media (max-width: 760px) {
   body { padding: 24px 18px 48px; font-size: 14px; }
   h1 { font-size: 25px; }

@@ -83,6 +83,7 @@ ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
         "total_profit": ("TOTAL_PROFIT", "利润总额"),
         "net_profit": ("NETPROFIT", "净利润"),
         "parent_net_profit": ("PARENT_NETPROFIT", "归母净利润"),
+        "minority_interest": ("MINORITY_INTEREST", "少数股东损益"),
         "deduct_parent_net_profit": ("DEDUCT_PARENT_NETPROFIT", "扣非净利润"),
         "basic_eps": ("BASIC_EPS", "基本每股收益", "EPS"),
         "selling_expense": ("SELLING_EXPENSE", "SALE_EXPENSE", "销售费用"),
@@ -124,6 +125,7 @@ ALIASES: dict[str, dict[str, tuple[str, ...]]] = {
         "development_expense": ("DEVELOP_EXPENSE", "开发支出"),
         "construction_in_progress": ("CONSTRUCTION_IN_PROGRESS", "CIP", "在建工程"),
         "trading_financial_assets": ("TRADE_FINASSET_NOTFVTPL", "TRADE_FINASSET", "交易性金融资产"),
+        "fair_value_financial_assets": ("FAIR_VALUE_FINASSET", "公允价值计量金融资产合计"),
         "other_noncurrent_financial_assets": ("OTHER_NONCURRENT_FINASSET", "其他非流动金融资产"),
         "other_equity_investment": ("OTHER_EQUITY_INVEST", "其他权益工具投资"),
         "long_equity_investment": ("LONG_EQUITY_INVEST", "长期股权投资"),
@@ -813,7 +815,7 @@ def _history_q4(cf: pd.DataFrame | None) -> list[dict[str, Any]]:
 def _filing_period_tokens(period: date, period_type: str) -> tuple[str, ...]:
     type_tokens = {
         "annual": ("年报", "annual", "年度报告"),
-        "semiannual": ("半年", "中报", "semiannual", "半年度报告"),
+        "semiannual": ("半年", "中报", "中期", "semiannual", "interim", "半年度报告"),
         "q1": ("一季", "q1", "第一季度", "季度报告"),
         "q3": ("三季", "q3", "第三季度", "季度报告"),
     }.get(period_type, ())
@@ -859,11 +861,11 @@ def _read_filing_pages(path: Path) -> list[tuple[int | None, str]]:
 
 
 MANAGEMENT_TOPICS: dict[str, tuple[str, ...]] = {
-    "利润": ("营业收入", "净利润", "归母净利润", "毛利率", "利润下降", "利润增长", "盈利"),
-    "现金流": ("经营活动产生的现金流量净额", "经营现金流", "现金流", "回款", "收款"),
+    "利润": ("营业收入", "净利润", "归母净利润", "毛利率", "利润下降", "利润增长", "盈利", "revenues", "gross margin", "operating profit"),
+    "现金流": ("经营活动产生的现金流量净额", "经营现金流", "现金流", "回款", "收款", "cash flow", "cash flows", "prepayments"),
     "汇兑": ("汇兑", "汇率"),
     "存货": ("存货", "原材料", "备货", "跌价", "库龄", "库存"),
-    "投资收益": ("投资收益", "公允价值", "金融资产", "理财", "股票"),
+    "投资收益": ("投资收益", "公允价值", "金融资产", "理财", "股票", "fair value", "investment gains"),
 }
 
 
@@ -889,10 +891,10 @@ def _extract_management_evidence(data_dir: Path, period: date | None, period_typ
                 continue
             section_match = re.search(r"(管理层讨论与分析|经营情况讨论与分析|经营情况|重大事项|财务报告)", normalized)
             section = section_match.group(1) if section_match else "原版财报文本"
-            sentences = re.split(r"(?<=[。！？；])", normalized)
+            sentences = re.split(r"(?<=[。！？；])|(?<=[.!?;])\s+(?=[A-Z])", normalized)
             for topic, keywords in MANAGEMENT_TOPICS.items():
                 for sentence in sentences:
-                    if not any(keyword in sentence for keyword in keywords):
+                    if not any(keyword.lower() in sentence.lower() for keyword in keywords):
                         continue
                     if any(token in sentence for token in ("电子信箱", "联系电话", "公司选定的信息披露报纸")):
                         continue
@@ -1191,6 +1193,7 @@ def _financial_asset_review(profile: dict[str, Any], bs_cur: dict[str, Any], bs_
     if not profile.get("financial_asset_review"):
         return {"applicable": False, "status": "not_applicable", "conclusion": "当前行业配置不启用非主营金融资产检查。", "components": []}
     market_asset_fields = [
+        ("公允价值计量金融资产合计", "fair_value_financial_assets"),
         ("交易性金融资产", "trading_financial_assets"),
         ("其他非流动金融资产", "other_noncurrent_financial_assets"),
         ("其他权益工具投资", "other_equity_investment"),

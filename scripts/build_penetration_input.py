@@ -34,6 +34,7 @@ import math
 import argparse
 import json
 from valuation_math import canonical_ebitda
+from calc_penetration_return import diagnose_lambda
 import sys
 from pathlib import Path
 
@@ -108,6 +109,12 @@ def dps_by_fiscal_year(div: pd.DataFrame) -> pd.DataFrame:
     分红记录"现金分红-现金分红比例"列值为"每10股派X元"的 X -> DPS = X/10；
     同财年多个报告期（年报+中期）合并求和（如 2025 年报0.8+中期0.2=1.0）。
     """
+    if {"财政年度", "分红方案"}.issubset(div.columns):
+        # HK feed cash dividends are per share HKD. Distributions in specie are excluded.
+        d = div.copy()
+        d["财年"] = pd.to_numeric(d["财政年度"], errors="coerce")
+        d["DPS"] = pd.to_numeric(d["分红方案"].astype(str).str.extract(r"每股派港币([\d.]+)元")[0], errors="coerce")
+        return d.dropna(subset=["财年", "DPS"]).groupby("财年")["DPS"].sum().sort_index()
     d = div[["报告期", "现金分红-现金分红比例"]].copy()
     d["报告期"] = pd.to_datetime(d["报告期"])
     d["财年"] = d["报告期"].dt.year
@@ -130,21 +137,32 @@ def depreciation_amount(row):
     total = amount_at(row, "DEPR_AMORT", "TOTAL_DEPR_AMORT")
     if total is not None:
         return total
-    names = ["FA_IR_DEPR", "IA_AMORTIZE", "LPE_AMORTIZE"]
-    if "USERIGHT_ASSET_AMORTIZE" in row.index:
-        names.append("USERIGHT_ASSET_AMORTIZE")
-    values = [amount_at(row, name) for name in names]
-    return sum(values) if all(v is not None for v in values) else None
+    fa = amount_at(row, "FA_IR_DEPR")
+    if fa is None:
+        return None
+    ia = amount_at(row, "IA_AMORTIZE") or 0.0
+    lpe = amount_at(row, "LPE_AMORTIZE") or 0.0
+    d = fa + ia + lpe
+    useright = amount_at(row, "USERIGHT_ASSET_AMORTIZE")
+    if useright is not None:
+        d += useright
+    return d
 
 
 def financial_snapshot(balance, income, depreciation):
     warnings = []
     cash = amount_at(balance, "MONETARYFUNDS")
-    components = [amount_at(balance, name) for name in ("SHORT_LOAN","LONG_LOAN","BOND_PAYABLE","SHORT_BOND_PAYABLE")]
-    debt = sum(components) if all(v is not None for v in components) else None
-    warnings.append("有息负债为短借+长借+应付债+短融窄口径，租赁/一年内到期及其他融资须人工补核")
+    core_components = [amount_at(balance, name) for name in ("SHORT_LOAN","LONG_LOAN")]
+    if all(v is not None for v in core_components):
+        bond = amount_at(balance, "BOND_PAYABLE") or 0.0
+        short_bond = amount_at(balance, "SHORT_BOND_PAYABLE") or 0.0
+        noncurrent_1y = amount_at(balance, "NONCURRENT_LIAB_1YEAR") or 0.0
+        debt = sum(core_components) + bond + short_bond + noncurrent_1y
+    else:
+        debt = None
+    warnings.append("有息负债为短借+长借+应付债券+短融+一年内到期非流动负债，租赁及其他融资须人工补核")
     pbt = amount_at(income, "TOTAL_PROFIT")
-    interest = amount_at(income, "FE_INTEREST_EXPENSE")
+    interest = amount_at(income, "FE_INTEREST_EXPENSE", "INTEREST_EXPENSE", "FINANCE_EXPENSE")
     ebitda = canonical_ebitda(pbt, interest, depreciation)
     assets = amount_at(balance,"TOTAL_CURRENT_ASSETS")
     liabilities = amount_at(balance,"TOTAL_CURRENT_LIAB")
@@ -176,6 +194,7 @@ def main():
     ap.add_argument("--rf", type=float, default=.017)
     ap.add_argument("--price", type=float)
     ap.add_argument("--payout", type=float, help="有证据支持的人工支付率；不提供时取历史最低档")
+    ap.add_argument("--quote-fx", type=float, default=1.0, help="每单位交易币种折合财务币种；港股须明确填HKD/CNY，历史支付率仍用已支付现金校准")
     ap.add_argument("--c-fwd", type=float, help="亿元")
     ap.add_argument("--m-fwd", type=float)
     ap.add_argument("--k-fwd", type=float)
@@ -224,8 +243,9 @@ def main():
     div = pd.read_csv(data/"分红送配记录.csv",encoding="utf-8-sig")
     dps = dps_by_fiscal_year(div)
     years = [dt.year for dt in reversed(dates)]
-    m2 = [float(dps.loc[y])*shares/profits[i] for i,y in enumerate(years[:3]) if y in dps.index and profits[i]>0]
-    m1 = [float(dps.loc[y])/eps[i] for i,y in enumerate(years[:3]) if y in dps.index and eps[i]>0]
+    compatible_dividend = "财政年度" not in div.columns and args.quote_fx == 1.0
+    m2 = [float(dps.loc[y])*shares/profits[i] for i,y in enumerate(years[:3]) if y in dps.index and profits[i]>0] if compatible_dividend else []
+    m1 = [float(dps.loc[y])/eps[i] for i,y in enumerate(years[:3]) if y in dps.index and eps[i]>0] if compatible_dividend else []
     payout = args.payout if args.payout is not None else min(m2) if m2 else None
     if payout is None or not 0<=payout<=1:
         raise ValueError("支付率不可判定或超出0~1；须核查分红与股本后用--payout明确输入")
@@ -236,7 +256,9 @@ def main():
     price = args.price if args.price is not None else float(daily[close_col(daily)].iloc[-1])
     if not math.isfinite(price) or price<=0:
         raise ValueError("现价无效")
-    cap = price*shares
+    if not math.isfinite(args.quote_fx) or args.quote_fx <= 0:
+        raise ValueError("quote-fx 必须是明确、有效的正汇率")
+    cap = price*shares*args.quote_fx
     snapshot = financial_snapshot(bs.iloc[-1],pnl.iloc[-1],depreciation[0])
     warnings = snapshot["input_warnings"]
     warnings.extend(["G为总资本开支/折旧代理，不等于已确认的维持性资本开支；扩产期须人工判断",
@@ -252,14 +274,21 @@ def main():
     reliable = bool(segments) and len(signs)<=1 and all(abs(v)<=1.5 for v in segments)
     if median is not None and abs(median)>1e-6 and any(abs(v)>2*abs(median) for v in segments):
         reliable = False
-    lam = sum(segments)/len(segments) if reliable else 0
-    if not reliable:
-        warnings.append("λ符号矛盾/异常或缺失，按0兜底；敏感性不可解读为收入弹性")
+    lambda_diagnostics = diagnose_lambda({'surplus_series': surplus, 'revenue_series': revenues,
+                                          'financial_years': years})
+    lam = lambda_diagnostics['raw_mean']
+    if lam is None:
+        warnings.append("无有效历史λ区间，不启用历史均值参考；旧模式平线不表示经营弹性为0，不输出k*")
+    elif not reliable:
+        warnings.append("λ历史估计可靠性低，保留原始均值仅作条件敏感性参考；不以0替代估计，不输出精确k*")
+    lambda_policy = "historical_mean_reference" if lambda_diagnostics["raw_mean"] is not None else "legacy_zero"
     cfg = {"schema_version":2,"company":args.company,"code":args.code,"date":str(daily[date_col].max().date()),
-           "price":price,"market_cap":cap,"shares":shares,"net_profit_C":profits[0],"depreciation_D":depreciation[0],
+           "price":price,"market_cap":cap,"shares":shares,"quote_fx":args.quote_fx,"net_profit_C":profits[0],"depreciation_D":depreciation[0],
            "capex_ratio_G":g,"profit_discount_k":.8,"payout_M":payout,"payout_M_min":min(m2) if m2 else None,
            "payout_M_mean":sum(m2)/len(m2) if m2 else None,"aa_2y":sum(surplus[:2])/2,"aa_all":sum(surplus)/len(surplus),
            "rf":args.rf,"cycle_adjust_pct":0,"base_revenue":revenues[0],"lambda":lam,"surplus_series":surplus,
+           "lambda_policy":lambda_policy,"lambda_reliable":reliable,
+           "lambda_diagnostics":lambda_diagnostics,"financial_years":years,
            "revenue_series":revenues,"fcf":ocf[0]-capex[0],"goodwill":amount_at(bs.iloc[-1],"GOODWILL"),
            "total_assets":amount_at(bs.iloc[-1],"TOTAL_ASSETS"),"dps":float(dps.loc[years[0]]) if years[0] in dps.index else None,
            "low_10y_close":None,"low_10y_close_verified":False,"financial_period":str(dates[-1].date()),**snapshot}

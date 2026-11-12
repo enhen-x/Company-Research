@@ -223,6 +223,37 @@ def _find_json_by_keys(project: Path, required: set[str]) -> dict | None:
     return None
 
 
+def _derived_sensitivity(project: Path) -> dict | None:
+    """Reconstruct the default Figure 11 series from calculator output."""
+    path = project / "reports" / "穿透回报率_输出.json"
+    try:
+        output = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    rows = output.get("single_year")
+    if not isinstance(rows, list):
+        return None
+    points = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            x = float(row["k"])
+            y = float(row["gg"]) * 100.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        if math.isfinite(x) and math.isfinite(y):
+            points.append((x, y))
+    if not points or output.get("II") is None:
+        return None
+    return {
+        "mode": "script_cash_surplus",
+        "x": [x for x, _ in points],
+        "系列": [{"name": "GG · 单年下滑情景", "y": [y for _, y in points]}],
+        "门槛": float(output["II"]) * 100.0,
+    }
+
+
 def check_sensitivity_contract(project: Path, report_text: str) -> tuple[list[str], list[str]]:
     """G8-SENS: validate Figure 11 data, axis semantics, and flat-line disclosure."""
     warnings, failures = [], []
@@ -236,10 +267,14 @@ def check_sensitivity_contract(project: Path, report_text: str) -> tuple[list[st
         return warnings, failures
 
     ops = _find_json_by_keys(project, {"sensitivity"})
-    if ops is None:
+    sensitivity = ops.get("sensitivity") if ops is not None else None
+    if sensitivity is None:
+        sensitivity = _derived_sensitivity(project)
+        if sensitivity is not None:
+            warnings.append("G8-SENS: Figure 11 sensitivity was reconstructed from 穿透回报率_输出.json")
+    if sensitivity is None:
         failures.append("G8-SENS: Figure 11 is embedded but input JSON has no sensitivity data")
         return warnings, failures
-    sensitivity = ops.get("sensitivity")
     if not isinstance(sensitivity, dict):
         failures.append("G8-SENS: sensitivity must be an object")
         return warnings, failures
@@ -261,6 +296,8 @@ def check_sensitivity_contract(project: Path, report_text: str) -> tuple[list[st
     x_span = max(map(float, x)) - min(map(float, x)) if numeric_list(x) else 0.0
     sensitivity_disclosure = " ".join(str(v) for v in (
         sensitivity.get("注", ""), sensitivity.get("note", "")))
+    # A decimal such as λ=0.0117 is not a disclosure of zero exposure.
+    zero_lambda_pattern = r"(?:lambda|λ)\s*=\s*[+-]?0(?:\.0*)?(?![\d.])"
     for idx, item in enumerate(series):
         if not isinstance(item, dict) or not isinstance(item.get("y"), list):
             failures.append(f"G8-SENS: series {idx + 1} has no y sequence")
@@ -277,7 +314,8 @@ def check_sensitivity_contract(project: Path, report_text: str) -> tuple[list[st
         disclosure = " ".join(str(v) for v in (item.get("name", ""), sensitivity_disclosure))
         explicit_manual = (
             mode in {"manual_cash_surplus", "manual", "not_applicable"}
-            or re.search(r"lambda\s*=\s*0|λ\s*=\s*0|未建模|未映射|水平线|平线|手算|手工|补充|降级", disclosure, re.I)
+            or re.search(zero_lambda_pattern, disclosure, re.I)
+            or re.search(r"未建模|未映射|水平线|平线|手算|手工|补充|降级", disclosure, re.I)
         )
         if x_span > 1e-9 and y_span <= 1e-9:
             if not explicit_manual:
@@ -291,16 +329,21 @@ def check_sensitivity_contract(project: Path, report_text: str) -> tuple[list[st
     model = _find_json_by_keys(project, {"lambda"})
     xlabel = str(sensitivity.get("xlabel", "")).lower()
     mode = str(sensitivity.get("mode", "")).lower()
-    income_marker = chr(25910) + chr(20837)
+    # Match an actual revenue-factor axis, not a disclosure such as
+    # "不代表收入弹性" in an otherwise valid pressure-factor label.
+    revenue_axis = bool(re.search(
+        r"(?:收入\s*(?:倍数|情景|系数)|revenue\s*(?:multiple|scenario|factor)|income\s*(?:multiple|scenario|factor))",
+        xlabel, re.I,
+    ))
     lambda_zero = False
     if model is not None:
         try:
             lambda_zero = float(model.get("lambda", 0) or 0) == 0
         except (TypeError, ValueError):
             pass
-    lambda_zero = lambda_zero or bool(re.search(r"lambda\s*=\s*0|λ\s*=\s*0", sensitivity_disclosure, re.I))
+    lambda_zero = lambda_zero or bool(re.search(zero_lambda_pattern, sensitivity_disclosure, re.I))
     if lambda_zero:
-        if ("revenue" in xlabel or "income" in xlabel or income_marker in xlabel) and mode not in {"manual_cash_surplus", "manual", "not_applicable"}:
+        if revenue_axis and mode not in {"manual_cash_surplus", "manual", "not_applicable"}:
             failures.append("G8-SENS: lambda=0 but Figure 11 is still labelled as a revenue multiple")
         if mode in {"manual_cash_surplus", "manual"}:
             if manual_marker not in report_text and "manual" not in report_text.lower():
@@ -309,6 +352,56 @@ def check_sensitivity_contract(project: Path, report_text: str) -> tuple[list[st
     threshold = sensitivity.get(threshold_key)
     if threshold is None or not isinstance(threshold, (int, float)) or not math.isfinite(float(threshold)):
         failures.append("G8-SENS: Figure 11 has no valid threshold line")
+
+    # The chart input is intentionally editable for custom views, but modes
+    # that claim to be script-backed must stay numerically tied to the
+    # deterministic calculator output. Manual modes remain allowed and receive
+    # a warning when their copied values drift.
+    output_path = project / "reports" / "穿透回报率_输出.json"
+    try:
+        output = json.loads(output_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        output = None
+    mode = str(sensitivity.get("mode", "")).lower()
+    if isinstance(output, dict) and mode in {"script_cash_surplus", "cash_surplus", "manual_cash_surplus", "manual", "g_grid", "capex_g"}:
+        if mode in {"script_cash_surplus", "cash_surplus", "manual_cash_surplus", "manual"}:
+            rows = output.get("single_year")
+            x_key, y_key = "k", "gg"
+        else:
+            rows = output.get("g_grid")
+            x_key, y_key = "G", "oe_yield"
+        expected = {}
+        if isinstance(rows, list):
+            for row in rows:
+                if isinstance(row, dict):
+                    try:
+                        expected[round(float(row[x_key]), 8)] = float(row[y_key]) * 100.0
+                    except (KeyError, TypeError, ValueError):
+                        continue
+        mismatches = []
+        for index, item in enumerate(series or []):
+            if not isinstance(item, dict):
+                continue
+            ys = item.get("y") or []
+            for xi, yi in zip(x, ys):
+                try:
+                    exp = expected.get(round(float(xi), 8))
+                    actual = float(yi)
+                except (TypeError, ValueError):
+                    continue
+                if exp is None or abs(actual - exp) > max(0.02, abs(exp) * 0.001):
+                    mismatches.append(f"series {index + 1} x={xi:g}: chart={actual:g}, script={exp if exp is not None else 'missing'}")
+        if threshold is not None and output.get("II") is not None:
+            expected_threshold = float(output["II"]) * 100.0
+            if abs(float(threshold) - expected_threshold) > 0.02:
+                mismatches.append(f"threshold: chart={float(threshold):g}, script={expected_threshold:g}")
+        if mismatches:
+            detail = "；".join(mismatches[:3])
+            message = f"G8-SENS: 图11与穿透回报率脚本输出不一致（{detail}）"
+            if mode in {"script_cash_surplus", "cash_surplus", "g_grid", "capex_g"}:
+                failures.append(message)
+            else:
+                warnings.append(message)
     return warnings, failures
 
 
@@ -1124,6 +1217,8 @@ def _check_render_quality(project: Path) -> tuple[list[str], list[str]]:
         opf = project / "input" / "运营补充数据.json"
         if opf.exists():
             ops = json.loads(opf.read_text(encoding="utf-8"))
+        if hasattr(mod, "_bind_script_sensitivity"):
+            ops = mod._bind_script_sensitivity(project, ops)
         ind = mod.load_industry_cost_price(data_dir)
         if ind and "industry_cost_price" not in ops:
             ops["industry_cost_price"] = ind
@@ -1299,7 +1394,8 @@ def _check_render_quality(project: Path) -> tuple[list[str], list[str]]:
                 # ④ 图06 同行估值对比必须散点
                 if label == "图06":
                     scatters = [c for ax in fig.axes for c in ax.collections]
-                    bars = [p_ for ax in fig.axes for p_ in ax.patches]
+                    from matplotlib.patches import Rectangle
+                    bars = [p_ for ax in fig.axes for p_ in ax.patches if isinstance(p_, Rectangle)]
                     if not scatters:
                         failures.append(
                             "G8-RENDER: 图06 同行估值对比应使用散点图（未检测到 scatter collection）——禁止柱状图堆叠对比")
@@ -1385,6 +1481,8 @@ def _check_all_xticks(project: Path) -> tuple[list[str], list[str]]:
         opf = project / "input" / "运营补充数据.json"
         if opf.exists():
             ops = json.loads(opf.read_text(encoding="utf-8"))
+        if hasattr(mod, "_bind_script_sensitivity"):
+            ops = mod._bind_script_sensitivity(project, ops)
         ind = mod.load_industry_cost_price(data_dir)
         if ind and "industry_cost_price" not in ops:
             ops["industry_cost_price"] = ind

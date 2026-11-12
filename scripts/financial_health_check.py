@@ -51,7 +51,7 @@ CHART_COLORS = {
 
 def _setup_chart_style() -> None:
     plt.rcParams.update({
-        "font.sans-serif": ["Microsoft YaHei", "SimHei", "Noto Sans CJK SC", "Arial Unicode MS", "DejaVu Sans"],
+        "font.sans-serif": ["Microsoft YaHei", "SimHei", "PingFang SC", "Segoe UI", "Noto Sans CJK SC", "Arial Unicode MS", "DejaVu Sans"],
         "axes.unicode_minus": False,
         "axes.edgecolor": "#CBD5E1",
         "axes.labelcolor": CHART_COLORS["ink"],
@@ -208,6 +208,15 @@ def _follow_up_items(data: dict[str, Any]) -> list[str]:
     return items[:5] or ["下一期财报：复核利润、经营现金流和关键营运项目是否回到合理区间。"]
 
 
+def _apply_health_spines(ax: Any) -> None:
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#E2E8F0")
+    ax.spines["bottom"].set_color("#CBD5E1")
+    ax.tick_params(axis="x", pad=7, labelsize=8.8)
+    ax.tick_params(axis="y", pad=7, labelsize=8.5)
+
+
 def _render_cash_chart(data: dict[str, Any], path: Path) -> None:
     """Chart 01: operating cash flow, profit and cash conversion trend."""
     diagnosis = data.get("cash_flow_diagnosis", {})
@@ -241,12 +250,13 @@ def _render_cash_chart(data: dict[str, Any], path: Path) -> None:
         _label_bars(axes[0], bars, fontsize=8)
     axes[0].set_xticks(x, labels)
     axes[0].set_title("经营现金流与归母净利润（亿元）", loc="left", fontsize=11, pad=12)
-    axes[0].set_ylabel("亿元")
+    axes[0].set_ylabel("亿元", labelpad=10)
     axes[0].axhline(0, color="#64748B", linewidth=0.8)
     axes[0].grid(axis="y", color=CHART_COLORS["grid"], linewidth=0.8)
     axes[0].set_axisbelow(True)
-    axes[0].legend(frameon=False, loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=2)
-    axes[0].margins(x=0.08, y=0.18)
+    _apply_health_spines(axes[0])
+    axes[0].legend(frameon=False, loc="lower center", bbox_to_anchor=(0.5, 1.02), ncol=2, handletextpad=0.8, columnspacing=1.6)
+    axes[0].margins(x=0.08, y=0.22)
 
     valid_conversion = [value if np.isfinite(value) else np.nan for value in conversion]
     axes[1].plot(x, valid_conversion, color=CHART_COLORS["positive"], marker="o", linewidth=2.2)
@@ -257,10 +267,11 @@ def _render_cash_chart(data: dict[str, Any], path: Path) -> None:
     axes[1].axhline(100, color="#CBD5E1", linestyle="--", linewidth=1.0)
     axes[1].set_xticks(x, labels)
     axes[1].set_title("经营现金流 / 归母净利润（%）", loc="left", fontsize=11, pad=12)
-    axes[1].set_ylabel("%")
+    axes[1].set_ylabel("%", labelpad=10)
     axes[1].grid(axis="y", color=CHART_COLORS["grid"], linewidth=0.8)
     axes[1].set_axisbelow(True)
-    axes[1].margins(x=0.10, y=0.24)
+    _apply_health_spines(axes[1])
+    axes[1].margins(x=0.10, y=0.26)
     _save_chart(fig, path)
 
 
@@ -289,13 +300,14 @@ def _render_driver_chart(data: dict[str, Any], path: Path) -> None:
             ax.annotate(f"{_chart_amount(value, signed=True)} 亿元", (value, bar.get_y() + bar.get_height() / 2),
                         xytext=(offset, 0), textcoords="offset points", ha=ha, va="center", fontsize=9,
                         color=CHART_COLORS["ink"])
-        ax.set_xlabel("估算现金影响（亿元）")
+        ax.set_xlabel("估算现金影响（亿元）", labelpad=10)
         ax.axvline(0, color="#64748B", linewidth=0.9)
         ax.ticklabel_format(style="plain", axis="x", useOffset=False)
         ax.set_title("经营项目对现金流的方向性影响", loc="left", fontsize=11, pad=12)
         ax.grid(axis="x", color=CHART_COLORS["grid"], linewidth=0.8)
         ax.set_axisbelow(True)
-        ax.margins(x=0.18, y=0.12)
+        _apply_health_spines(ax)
+        ax.margins(x=0.18, y=0.16)
     else:
         ax.axis("off")
         ax.text(0.5, 0.57, "本期未取得足够经营项目字段，\n暂不能拆分经营现金流变化原因。",
@@ -367,13 +379,14 @@ def _render_profit_chart(data: dict[str, Any], path: Path) -> None:
         ax.plot([index - 0.29, index + 0.29], [level, level], color="#94A3B8", linestyle="--", linewidth=0.8)
     ax.set_xticks(x, labels)
     ax.tick_params(axis="x", pad=10)
-    ax.set_ylabel("归母净利润（亿元）")
+    ax.set_ylabel("归母净利润（亿元）", labelpad=10)
     ax.ticklabel_format(style="plain", axis="y", useOffset=False)
     ax.set_title("归母净利润同比变动桥（亿元）", loc="left", fontsize=11, pad=12)
     ax.axhline(0, color="#64748B", linewidth=0.8)
     ax.grid(axis="y", color=CHART_COLORS["grid"], linewidth=0.8)
     ax.set_axisbelow(True)
-    ax.margins(x=0.06, y=0.22)
+    _apply_health_spines(ax)
+    ax.margins(x=0.06, y=0.26)
     _save_chart(fig, path)
 
 
@@ -395,12 +408,13 @@ def _render_special_review_chart(data: dict[str, Any], path: Path) -> None:
         bars = ax.bar(x, numeric, color=colors, width=0.58)
         _label_bars(ax, bars, amount=False, percent=True, fontsize=9)
         ax.set_xticks(x, ["收入\n增速", "存货\n增速", "周转天数\n变化", "合同负债\n增速"])
-        ax.set_ylabel("同比变化（%）")
+        ax.set_ylabel("同比变化（%）", labelpad=10)
         ax.axhline(0, color="#64748B", linewidth=0.8)
         ax.grid(axis="y", color=CHART_COLORS["grid"], linewidth=0.8)
         ax.set_axisbelow(True)
+        _apply_health_spines(ax)
         ax.set_title(f"存货检查结论：{_inventory_status_label(inventory.get('status'))}", loc="left", fontsize=11, pad=12)
-        ax.margins(x=0.12, y=0.24)
+        ax.margins(x=0.12, y=0.28)
     elif finance.get("applicable"):
         _chart_frame(fig, "本期财报体检 | 非主营投资和金融资产检查",
                      f"{period.get('current') or '本期'} | 区分已实现收益、浮盈和产业投资，不能仅凭投资收益认定异常")
@@ -422,10 +436,11 @@ def _render_special_review_chart(data: dict[str, Any], path: Path) -> None:
         y = np.arange(len(labels))
         bars = ax.barh(y, valid, color=CHART_COLORS["current"], height=0.5)
         ax.set_yticks(y, [_wrap_label(label, 14) for label in labels])
-        ax.set_xlabel("期末规模/金额（亿元）")
+        ax.set_xlabel("期末规模/金额（亿元）", labelpad=10)
         ax.set_title(f"金融资产检查结论：{_financial_status_label(finance.get('status'))}", loc="left", fontsize=11, pad=12)
         ax.grid(axis="x", color=CHART_COLORS["grid"], linewidth=0.8)
         ax.set_axisbelow(True)
+        _apply_health_spines(ax)
         for bar, value in zip(bars, valid):
             if abs(value) < 0.005:
                 continue
@@ -1132,7 +1147,7 @@ def render_report_section(data: dict[str, Any], json_digest: str) -> str:
         lines.append("| — | — | 当前字段不足，暂不能拆分利润变化 |")
     lines.extend([
         "",
-        f"利润结论：**归母净利润同比 {_pct(profit_growth)}，{_profit_status_label(profit_diag.get('status'))}**；营业利润变化约 **{_amount(profit_diag.get('operating_profit_delta'))} 亿元**，投资收益和公允价值变动本期合计 **{_amount(finance_total)} 亿元**，已包含在营业利润中，不重复加总；需区分产业投资收益与金融资产浮盈。",
+        f"利润结论：**归母净利润同比 {_pct(profit_growth)}，{_profit_status_label(profit_diag.get('status'))}**；营业利润变化约 **{_amount(profit_diag.get('operating_profit_delta'))} 亿元**，投资收益和公允价值变动本期合计 **{_amount(finance_total)} 亿元**。投资项目按适用会计准则及报表列报位置归入对应汇总项，不能重复加总；需区分产业投资收益与金融资产浮盈。",
         "",
         "#### 存货专项检查", "",
         f"本公司属于{industry_label}行业，{inventory_note}**本期存货增速与收入增速基本匹配，暂未触发升级核查**；后续若存货持续快于收入增长、周转恶化并缺少销售支持，再升级核查。",

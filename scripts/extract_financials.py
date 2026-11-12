@@ -137,10 +137,12 @@ def main() -> int:
             p(f"\n[WARN] 缺少 {fname}，跳过分位计算")
             continue
         df = pd.read_csv(f, encoding="utf-8")
-        df["date"] = pd.to_datetime(df["date"])
+        date_col = "date" if "date" in df.columns else ("日期" if "日期" in df.columns else df.columns[0])
+        close_col = "close" if "close" in df.columns else ("收盘" if "收盘" in df.columns else df.columns[3])
+        df["date"] = pd.to_datetime(df[date_col])
         # 前复权源在早期可能返回负值，不能混入十年分位；窗口按最新交易日回溯。
-        df = df[pd.to_numeric(df["close"], errors="coerce").notna()].copy()
-        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        df = df[pd.to_numeric(df[close_col], errors="coerce").notna()].copy()
+        df["close"] = pd.to_numeric(df[close_col], errors="coerce")
         latest_date = df["date"].max()
         window_start = latest_date - pd.DateOffset(years=10)
         valid_window = df[(df["date"] >= window_start) & (df["close"] > 0)].copy()

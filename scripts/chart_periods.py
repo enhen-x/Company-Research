@@ -211,8 +211,15 @@ def annual_growth(pack, key, years):
             result.append(None)
         elif key in RATIOS:
             result.append(current-prior)
+        elif key == 'net_cash':
+            # 净现金（余额指标）：计算年度净增减额（亿元），消除常年为负导致的空折线
+            result.append((current - prior) / 1e8)
         else:
-            result.append((current/prior-1)*100 if prior > 0 and current >= 0 else None)
+            # 流量指标（营收/净利/现金流等）：基期非零时计算连续变化率，即使跨零/负值折线依然连续
+            if prior != 0:
+                result.append((current - prior) / abs(prior) * 100)
+            else:
+                result.append(None)
     return result
 
 
