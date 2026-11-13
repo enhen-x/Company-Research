@@ -536,7 +536,7 @@ TEMPLATE_SCRIPTS = [
     "verification.py", "extract_financials.py", "analyze_charts.py", "chart_qc.py",
     "format_qc.py", "gate_all.py", "run_support.py", "bounded_fetch.py", "fetch_sources.py", "fetch_peers_financials.py", "fetch_supplement.py",
     "fetch_industry_cost_price.py", "probe_sources.py", "fetch_with_fallback.py",
-    "calc_penetration_return.py", "build_penetration_input.py", "sotp_valuation.py",
+    "calc_penetration_return.py", "build_penetration_input.py", "sotp_valuation.py", "capex_dividend_engine.py",
     "financial_health_core.py", "financial_health_check.py", "financial_health_qc.py",
     "report_template_qc.py", "md_to_html.py",
     "research_topics.py", "research_topic_qc.py", "research_models.py", "capital_metrics.py",
@@ -786,6 +786,7 @@ def scaffold(project_dir: Path, symbol: str, code: str, name: str, status: str) 
 | 9 | 财报更新验证.md 追加 | 根目录汇总追加本批次一行（股价/12M三情景/财报要点/评级） | ⬜ |
 | 10 | SOTP 触发检测（平台型） | input/sotp_触发.json（sotp_valuation.py --detect-only；非平台型填"不适用"） | ⬜ |
 | 11 | SOTP 输入/输出（平台型触发时） | input/sotp_输入.json + reports/sotp_输出.json + 图18 分部估值SOTP | ⬜ 非平台型跳过 |
+| 12 | Capex 与分红跃迁分析（适用时） | input/capex_dividend_plan.json + 图19/图20/图21 + reports/capex_dividend_analysis.json + Capex与分红跃迁专项.md | ⬜ 按重资产/公用事业/高股息适用性启用 |
 
 ## 三、成稿门控（交付前逐项确认）
 

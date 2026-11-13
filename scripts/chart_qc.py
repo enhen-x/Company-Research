@@ -56,6 +56,9 @@ FIG_MAP = {
     16: (2, "行业成本与价格走势"),
     17: (None, "复验偏差图（台账，基线建立时跳过）"),
     18: (6, "分部估值SOTP（平台型公司强制）"),
+    19: (4, "Capex规划、在建转固与股价联动（启用Capex引擎时生成）"),
+    20: (4, "重大在建工程转固时间轴（启用Capex引擎且含在建清单时生成）"),
+    21: (6, "提高分红率财务可行性与造血留存（启用Capex引擎时生成）"),
 }
 
 # 章节标题→章节号（用于定位图引用所在章节）
@@ -67,6 +70,21 @@ _SECTION_KEYS = [
 
 # 图号→建议章节号（按 B4.3）；章节号 None 表示不校验（图16 台账）
 FIG_SECTION = {k: v[0] for k, v in FIG_MAP.items()}
+
+
+def _capex_trigger_status(project: Path) -> tuple[bool, bool]:
+    """返回 (enabled, has_projects)：仅当 input/capex_dividend_plan.json 存在且 enabled!=false 时触发图19-21。"""
+    p = project / "input" / "capex_dividend_plan.json"
+    if not p.is_file():
+        return False, False
+    try:
+        data = json.loads(p.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return True, False
+    if not isinstance(data, dict) or data.get("enabled") is False:
+        return False, False
+    projs = data.get("capex_plan", {}).get("key_projects", [])
+    return True, bool(isinstance(projs, list) and len(projs) > 0)
 
 
 def _chart_exemptions(project: Path) -> set[str]:
@@ -144,6 +162,11 @@ def check_listing_vs_embed(md_lines: list[str], project: Path | None = None) -> 
             _exempt.add("图18")
     except Exception:
         pass
+    _capex_on, _capex_tl = _capex_trigger_status(project)
+    if not _capex_on:
+        _exempt.update({"图19", "图20", "图21"})
+    elif not _capex_tl:
+        _exempt.add("图20")
     listing = {}
     for i, line in enumerate(md_lines):
         m = re.match(r"^\|\s*图(\d{2})\s*\|([^|]*)\|\s*(\S+)\s*\|", line.strip())
@@ -898,6 +921,7 @@ def check_report(report_md: Path, html_path: Path | None, chart_dir: Path,
         sotp_trig = bool(_t.get("enabled"))
     except Exception:
         pass
+    capex_trig, capex_has_tl = _capex_trigger_status(report_md.parents[1])
     for no in sorted(FIG_MAP):
         if no in (17,):
             continue
@@ -905,9 +929,15 @@ def check_report(report_md: Path, html_path: Path | None, chart_dir: Path,
             continue
         if no == 18 and not sotp_trig:
             continue  # 非平台型公司：图18 可选，不强制
+        if no in (19, 21) and not capex_trig:
+            continue  # 未启用 Capex 与分红跃迁引擎时可选，不强制
+        if no == 20 and (not capex_trig or not capex_has_tl):
+            continue  # 未启用引擎或无重大在建清单时跳过图20
         if no not in ref_fig_nos:
             if no == 18:
                 failures.append("图18（分部估值SOTP）触发平台型但未嵌入报告 §6——请运行 sotp_valuation.py 并补图18")
+            elif no in (19, 20, 21):
+                failures.append(f"图{no:02d}（{FIG_MAP[no][1]}）已配置 input/capex_dividend_plan.json 但未嵌入报告 §{FIG_MAP[no][0]}——请运行 capex_dividend_engine.py 并嵌入")
             else:
                 warnings.append(f"图{no:02d}（{FIG_MAP[no][1]}）未在报告中嵌入（行业不适用需在交付清单说明）")
     for fname in ref_fnames:
@@ -1017,6 +1047,10 @@ def check_report(report_md: Path, html_path: Path | None, chart_dir: Path,
     # 5) 图表清单（附录 10.4）与嵌入一致性
     for no in sorted(FIG_MAP):
         if no == 17:
+            continue
+        if no in (19, 21) and not capex_trig:
+            continue
+        if no == 20 and (not capex_trig or not capex_has_tl):
             continue
         if f"图{no:02d}" in exempt:
             continue

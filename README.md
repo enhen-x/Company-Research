@@ -15,6 +15,7 @@
 | 研究专题计算 | 指引、经营驱动、预测、反方及估值结果集中于结构化输入与输出，缺口保留 `INCOMPLETE` |
 | 成稿执行记录 | 每轮记录 `run_id`、阶段状态、退出码、耗时和输入/产物哈希；技术结果与研究证据等级分别披露 |
 | 图表修复 | 环形图清理空标签，保持百分比与扇区一致；双轴图合并全部有效系列，保留右轴价格图例 |
+| Capex与分红跃迁引擎 | 新增 `scripts/capex_dividend_engine.py`（图19–图21）：融合未来资本开支规划与前复权股价/除权分红节点、重大在建工程转固时间轴，以及同合并扣息口径 **`扣息FCFE/合并净利润 = (OCF - Capex - 费用化利息) / 合并净利润`** 与 `(1 - Capex/OCF)` 现金留存率走势 |
 
 版本变更见 [CHANGELOG.md](CHANGELOG.md)，完整执行规则见 [流水线契约](references/flow-contract.md)。
 
@@ -117,7 +118,18 @@ SZ.002001 新和成/
         └── 跟踪验证台账.md
 ```
 
-标准图号固定为图01—图18，适用性、期间、来源与豁免须明示；图表数量随公司和批次而变。首次研究没有事前预测样本时，不凭空生成历史预测胜率。
+标准图号固定为图01—图18（适用平台型触发图18；启用 `input/capex_dividend_plan.json` 时额外生成图19—图21 嵌入 §4.2 与 §6.4），适用性、期间、来源与豁免须明示；图表数量随公司和批次而变。首次研究没有事前预测样本时，不凭空生成历史预测胜率。
+
+## 最近更新（2026-11-13：阶段 2 Capex 与分红跃迁引擎正式集成）
+
+1. **打通前瞻 Capex 与分红可行性模块（`scripts/capex_dividend_engine.py`）**：
+   - 运行 `python scripts/capex_dividend_engine.py --dir . --init-template` 一键生成 `input/capex_dividend_plan.json` 骨架，结合年报/公告补齐未来 3 年资本开支规划、重大在建项目投产节点及《股东回报规划》保底分红承诺后，随 `gate_all.py` 自动重建并与 `chart_qc.py` 门控打通。
+2. **彻底修复双重口径错配（合并与扣息一致性）**：
+   - 摒弃将 100% 合并现金流 `(OCF - Capex)` 直接除以归母净利润导致的少数股东权益失真及 A 股 `OCF` 未扣费用化利息虚高，统一升级为 **同合并扣息自由现金流覆盖倍数 `(OCF - Capex - 费用化利息) / 合并净利润`**；历年实际分红率则严格由 `分红送配记录.csv` 除权日与分红方案刚性计算锁定。
+3. **三张硬核图表与精炼结论模板（图19—图21）**：
+   - **图19（§4.2）**：资本开支历史与规划全景曲线 + 前复权股价与历年除权分红节点下联动；
+   - **图20（§4.2）**：重大在建工程已投/待投资本开支进度与预计转固达产时间轴；
+   - **图21（§6.4）**：`扣息FCFE/合并净利润`（叠加历年实际分红率、本公司个性化保底线及 70%/100% 门槛，支持深度负谷区间分段压缩）与 `(1 - Capex/OCF)` 自主现金留存率；并移除主观六维雷达与 PE 重估 IRR 矩阵，只保留基于财务图表的客观判断。
 
 ## 估值与仓位口径
 
@@ -187,6 +199,8 @@ python scripts/template_regression.py --selfcheck
 在线集成测试使用 `python -m pytest tests/ -m integration -v`，需配置相应 Token、权限和测试资料。
 
 2026-10-28 本次发布验证：离线测试 **1611 项通过**，3 项在线集成测试未执行；README 的本地链接与 Pandoc 渲染检查通过。
+
+2026-11-13 阶段 2 集成验证：新增与管线定向测试（`test_capex_dividend_engine.py`、`test_chart_exemptions.py`、`test_report_build_pipeline.py`、`test_gate_incremental.py`、`test_v3_regression.py`）**90 项全部通过**，全图正向模板回归 `template_regression.py` 通过（`FAIL=0 WARN=4 rc=0`）；全量离线套件实测 **1615 项通过**（另有 9 项源自原基线 `test_chart_periods.py` / `test_pipeline_repairs.py` / `test_valuation_repairs.py` 的既有用例失败，本次改动未引入回归）。
 
 模板以本仓库为真源。修复应回写 `scripts/`，补充有意义的回归检查，再同步至研究批次；不能只修单份 PNG 或项目副本。工程约束见 [engineering-notes.md](references/engineering-notes.md)，最新期间和排版契约见 [chart-period-contract.md](references/chart-period-contract.md)。
 

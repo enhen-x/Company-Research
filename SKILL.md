@@ -219,12 +219,14 @@ B3 完成后自动运行 `scripts/financial_health_check.py`，生成 `reports/�
 
 **SOTP 分部估值（B4.6，平台型公司强制）**：运行 `scripts/sotp_valuation.py --detect-only` 自动检测 + 计算，输出 `reports/sotp_输出.json`，产出图18。
 
+**Capex 与分红跃迁引擎（B4.7，重资产/公用事业/高股息等 Capex 周期标的适用）**：运行 `python scripts/capex_dividend_engine.py --dir . --init-template` 初始化 `input/capex_dividend_plan.json` 并结合年报董事会资本开支指引、重大在建转固进度及《股东回报规划》补齐规划期数据后运行 `python scripts/capex_dividend_engine.py --dir .`（`gate_all.py` 在检测到已启用 `input/capex_dividend_plan.json` 时也会自动重建）。输出 `图19_Capex规划与股价联动.png`、`图20_重大在建工程转固时间轴.png`（写入 §4.2）、`图21_分红可行性与造血留存.png`（写入 §6.4）、`reports/capex_dividend_analysis.json` 与 `reports/Capex与分红跃迁专项.md`。口径严格以同合并扣息 **`扣息FCFE/合并净利润 = (OCF - Capex - 费用化利息) / 合并净利润`** 衡量内生分红支撑力，并叠加年报除权实际分红率对照；禁止添加主观六维雷达或 PE 重估 IRR 矩阵。
+
 **可视化标准（按行业适用性生成，全部嵌入 HTML，脚本可复现）**：分部营收图、单位经济学图、行业成本与价格走势图（图16，乳制品等成本驱动行业必配）、预测支撑图、估值带图（图13 PE_TTM、图14 PB，适用者生成，其余走既有豁免）、目标价图、同行估值对比图、敏感性表（实际采用估值方法的参数矩阵、周期均值窗口矩阵及穿透回报率图11）、复验偏差图（复验时）。图06 的 `peers` 数据必须包含恰好一行 `标的=true`（或 `target=true`）的目标公司，目标公司与同行统一进入散点坐标系；禁止用旧版 `高亮` 字段猜测目标身份。图13/14 的 `pe_high/low/mean` 必须按每个历史时点计算（年度日线区间或明确的滚动窗口），禁止把全历史 max/min/mean 复制到所有年份。主报告 HTML 由 `md_to_html.py` 从 MD 单源生成；Plotly HTML 仅是交互图合集，不承担正文渲染。
 
 
 #### B4.3 图表→报告章节映射表（强制，写报告时逐章嵌入）
 
-> 每张图表必须出现在对应章节正文中，使用 `![图NN 标题](图表/图NN_名称.png)` 嵌入；正文必须有文字解读与结论指向（禁止“见图NN”敷衍）。**图号固定 01–18（映射表见 framework.md §B4.3；图18=SOTP 分部估值，平台型公司强制），禁止自创编号**。
+> 每张图表必须出现在对应章节正文中，使用 `![图NN 标题](图表/图NN_名称.png)` 嵌入；正文必须有文字解读与结论指向（禁止“见图NN”敷衍）。**图号固定 01–21（映射表见 report-template.md §3；图18=SOTP 分部估值，平台型公司强制；图19–图21=Capex 与分红跃迁引擎，配置 `input/capex_dividend_plan.json` 时生效），禁止自创编号**。
 
 **图表纪律（2026-08 校准，详见 framework.md）**：
 
@@ -352,6 +354,7 @@ python scripts/calc_penetration_return.py --config input/穿透回报率_输入.
 | `scripts/report_template_qc.py` | 统一主报告模板门控（十部分/固定财务子节/必写内容/结论/元信息/占位符） | `python scripts/report_template_qc.py --report reports/<报告>.md` |
 | `scripts/verification.py` | 复验助手（预测 vs 实际对比、验证快照） | 立项时自动复制进项目 |
 | `scripts/sotp_valuation.py` | SOTP 分部估值（平台型公司强制，图18） | `python scripts/sotp_valuation.py --detect-only` |
+| `scripts/capex_dividend_engine.py` | Capex 规划、在建转固与分红可行性引擎（图19–图21，同合并扣息 `FCFE/合并NP` 口径） | `python scripts/capex_dividend_engine.py --dir . [--init-template]` |
 | `scripts/template_regression.py` | 模板回归测试（合成项目→出图16张→chart_qc 全图自检，发布前必跑，含 --selfcheck 负向自检） | `python scripts/template_regression.py` |
 | `scripts/calc_penetration_return.py` | 穿透回报率确定性计算器（OE/R/GG/II/KK/目标买入价/敏感性/绝对估值） | `python scripts/calc_penetration_return.py --config 输入.json` |
 | `scripts/build_penetration_input.py` | Phase 3B 输入 JSON 生成器 + 判断点说明 + λ 异常年诊断 | Phase 3B 开始时（强制） |

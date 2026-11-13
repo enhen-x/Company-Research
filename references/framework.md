@@ -1,6 +1,7 @@
 # 自动化证券调研框架（一句话触发 → 拉数 → 审计 → 分析 → 结论）
 
 > v2（2026-08-07）：由《券商深度标准》升级为**可执行流水线**。
+> 2026-11-13更新：**集成阶段 2「Capex 与分红跃迁引擎」(`scripts/capex_dividend_engine.py`)**——针对重资产/公用事业/高股息标的，支持 `--init-template` 一键生成 `input/capex_dividend_plan.json` 并在 `gate_all.py` 中自动重建。采用同合并扣息口径 **`扣息FCFE/合并净利润 = (OCF - Capex - 费用化利息) / 合并净利润`**（消除少数股东损益与未扣利息导致的高估畸变）、脚本刚性锁定历年除权实际分红率、生成 **图19（Capex全景+前复权股价及分红实施联动，§4.2）**、**图20（重大在建转固时间轴，§4.2）** 与 **图21（扣息FCFE覆盖倍数与现金留存率走向，§6.4；含极低负值区间分段压缩与个性化公司保底分红线）**；已按买方实用纪律删去主观六维评价与估值重估收益矩阵。
 > 2026-10-30更新：图11保留历史逐段斜率均值与独立可靠性诊断，正负混合不再强制置0；低可靠性仅作条件参考，不输出k*，不影响主R_eff或主买价。覆盖旧版λ=0兜底规定；旧批次不自动回写。详见`methodology.md`§4。
 > 图11默认路径同步：非零λ使用收入倍数横轴，低可靠性自动标注；零值识别匹配完整数值，不能将`λ=0.0117`误认成0或据此放行无解释平线。
 > 2026-10-24更新：B3.6/G8-PERIOD从原始三表识别最新实际期，图01/02/04/05/12/15在原图按年份分组完整年度空心柱和季度柱；流量季度由累计差分、同比/环比明确季度、累计ROE不作环比，E值不得替代实际。全部年度/季度柱分级字号标值；图例、子图、横轴和注释按实际像素边界自适应布局，最新年份可见。分部/同行/分红按独立披露日历核查。期间、数值、指纹、标注覆盖和间距均纳入审核。详见`chart-period-contract.md`。
@@ -104,6 +105,7 @@
 | `extract_financials.py` | 五年财务摘要（利润表/资产负债表/财务指标/分红）+ 股价分位（前复权+不复权）→ `reports/财务摘要.csv` | B1-B3 产出的三表/指标/分红/日线 CSV | `--dir --code --name --years` |
 | `analyze_charts.py` | B4.2 统一图表生成（PNG ≥10 张 + Plotly HTML 双输出）；财务/股价图自动读取 CSV，运营数据（COR/NBV/分部/同行/目标价/穿透回报率/敏感性）经 `--ops` JSON 补充，缺失自动跳过并提示 | B1-B3 CSV + `--ops` 运营补充 JSON（可选） | `--dir --code --name --ops --out --html-out` |
 | `fetch_industry_cost_price.py` | 行业成本—价格数据模板与审计器（B2.2）：生成 `data/行业成本价格.csv` 契约骨架、`行业成本价格_审计.json`、`行业成本价格_数据源指引.md`、`input/行业成本价格配置.json`（required 开关，驱动 G8-INDUSTRY 门控）；图16 数据源 | 无（联网检索/手工补录）+ 外部 CSV 可选 | `--dir --profile dairy --input-csv --optional --force` |
+| `capex_dividend_engine.py` | Capex 与分红跃迁引擎（阶段 2，适用重资产/公用事业/高股息）：刚性锁定历史分红实施记录与同合并扣息 `FCFE/合并NP`，生成图19/图20（§4.2）、图21（§6.4）、`reports/capex_dividend_analysis.json` 与 `Capex与分红跃迁专项.md` | B1-B3 CSV + `input/capex_dividend_plan.json` | `--dir . [--init-template]` |
 
 - **复制规则**：按需将模板复制到项目 `scripts/` 后运行；`--ops` 运营补充 JSON 建议存放 `input/运营补充数据.json`（键名见 `analyze_charts.py` 头部文档示例：cor/nbv/segment/premium_structure/dps/peers/targets/penetration/sensitivity）。
 - **适配纪律（金融/保险等特殊行业）**：标准穿透框架（折旧/资本开支/净现金）对保险等金融企业不适用，必须声明适配口径（AA=归母净利、M=现金分红支付率，EV/NBV/股息率辅助），并输出针对性 Warnings；`--ops` 中 `penetration` 键支持双口径并列。

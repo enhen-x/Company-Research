@@ -15,6 +15,17 @@ from pathlib import Path
 from run_support import BatchLock, atomic_json, fingerprints, now, run_process
 
 
+def _capex_enabled(project: Path) -> bool:
+    plan_path = project / "input" / "capex_dividend_plan.json"
+    if not plan_path.is_file():
+        return False
+    try:
+        data = json.loads(plan_path.read_text(encoding="utf-8-sig"))
+        return isinstance(data, dict) and data.get("enabled") is not False
+    except Exception:
+        return True
+
+
 def check_sotp(project, report):
     try:
         trigger = json.loads((project / "input" / "sotp_触发.json").read_text(encoding="utf-8-sig"))
@@ -132,6 +143,8 @@ def run_locked(args, project):
                                + (["--require-complete"] if args.require_research else [])))
         if not args.check_only:
             stages.append(("固定图表构建", "analyze_charts.py", ["--dir",str(project),"--code",code,"--name",name]))
+            if _capex_enabled(project):
+                stages.append(("Capex与分红跃迁图表与测算", "capex_dividend_engine.py", ["--dir", str(project)]))
         if not args.legacy:
             stages.extend([
                 ("主报告 HTML 渲染与一致性", "md_to_html.py", ["--input",str(report)]+(["--check"] if args.check_only else [])),
@@ -155,7 +168,7 @@ def run_locked(args, project):
             remaining = args.total_timeout - (time.monotonic()-started)
             if remaining <= 0:
                 entry.update(status="TIMEOUT", error="整次成稿预算耗尽", elapsed_seconds=0, finished_at=now())
-            elif reuse and label in ("固定图表构建", "主报告 HTML 渲染与一致性"):
+            elif reuse and label in ("固定图表构建", "Capex与分红跃迁图表与测算", "主报告 HTML 渲染与一致性"):
                 entry.update(status="REUSED", elapsed_seconds=0, finished_at=now(), reused_from_run_id=previous.get("run_id"),
                              reason="同一输入/代码/正文及全部产物哈希匹配")
             elif filename is None:

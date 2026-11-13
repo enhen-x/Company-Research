@@ -1,5 +1,12 @@
 ﻿# Changelog
 
+## 2026-11-13 — 阶段 2「Capex 与分红跃迁引擎」正式集成（洪城环境/四川成渝/国投电力三标验证）
+
+- **新增生产级模块 `scripts/capex_dividend_engine.py`**：支持 `--dir . --init-template` 基于三表与分红 CSV 生成 `input/capex_dividend_plan.json` 模板，正常执行时严格从原始 CSV 提取分红实施记录（支持年度/中期合计）与股价序列，生成 **图19（Capex全景+前复权股价与分红实施联动，§4.2）**、**图20（重大在建工程转固时间轴，§4.2）**、**图21（分红可行性与造血留存走向，§6.4）**、结构化 `reports/capex_dividend_analysis.json` 与可直接嵌入主报告的 `reports/Capex与分红跃迁专项.md`。
+- **会计与口径校准**：将自由现金流覆盖倍数统一为同合并扣息口径 `(OCF - Capex - 费用化利息) / 合并净利润`，解决非全资核心子公司（如雅砻江水电等）导致的合并现金流除归母利润畸高及 `OCF` 未扣利息问题；每张图仅保留本公司法定保底分红线 + 70% 跃迁线（+ 条件性 100% 覆盖线）并叠加历年实际分红率点线。
+- **视觉去拥挤优化**：当存在深度基建负谷（如 `< -1.2x`）时对负区间自动启用温和分段压缩，确保 `[0, 1.0x]` 分红门槛区清晰可读，压缩说明置右下角空白处；`33%–53%` 柱顶数字自动内嵌柱顶白字显示。
+- **全流程与门控接通**：`research_pipeline.py` 将 `capex_dividend_engine.py` 纳入 `TEMPLATE_SCRIPTS` 与交付清单；`gate_all.py` 在检测到已启用 `input/capex_dividend_plan.json` 时自动触发重算与成图；`chart_qc.py` 注册图19–图21 章节映射与按需门控；`report-template.md` / `framework.md` / `SKILL.md` / `README.md` 同步更新。
+
 ## 2026-10-30 — λ估计与可靠性分离（华东医药图11修复）
 
 - 计算器新增`historical_mean_reference`，保留历史逐段斜率均值与分年度诊断；正负混合只降低可靠性。低可靠性不输出k*，敏感性行增加现金校验情景买价；主回报率及主买价不变。
