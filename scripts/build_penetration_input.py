@@ -34,7 +34,7 @@ import math
 import argparse
 import json
 from valuation_math import canonical_ebitda
-from calc_penetration_return import diagnose_lambda
+from calc_penetration_return import diagnose_lambda, infer_industry_archetype, _MAINT_GAMMA_CAP
 import sys
 from pathlib import Path
 
@@ -200,6 +200,8 @@ def main():
     ap.add_argument("--k-fwd", type=float)
     ap.add_argument("--aa-fwd", type=float, help="亿元")
     ap.add_argument("--c-fwd-source", default="")
+    ap.add_argument("--archetype", default="", help="行业原型 (bank/non_bank_fin/internet_tech/manufacturing/consumer/utility_infra)")
+    ap.add_argument("--buyback", type=float, default=0.0, help="经核实年度注销式回购金额（亿元）")
     ap.add_argument("--overwrite", action="store_true", help="明确允许覆盖已有输入；默认保护人工判断")
     args = ap.parse_args()
     out = Path(args.out)
@@ -282,10 +284,36 @@ def main():
     elif not reliable:
         warnings.append("λ历史估计可靠性低，保留原始均值仅作条件敏感性参考；不以0替代估计，不输出精确k*")
     lambda_policy = "historical_mean_reference" if lambda_diagnostics["raw_mean"] is not None else "legacy_zero"
-    cfg = {"schema_version":2,"company":args.company,"code":args.code,"date":str(daily[date_col].max().date()),
+    archetype = args.archetype.strip() if args.archetype.strip() in _MAINT_GAMMA_CAP else infer_industry_archetype({
+        "company": args.company, "depreciation_D": depreciation[0], "input_warnings": warnings,
+    })
+    gamma_cap = _MAINT_GAMMA_CAP[archetype]
+    maint_gamma = 0.0 if (archetype in ("bank", "non_bank_fin") or depreciation[0] <= 0) else round(min(g, gamma_cap), 3)
+    fe_int = amount_at(pnl.iloc[-1], "FE_INTEREST_EXPENSE") or 0.0
+    ocf_latest = ocf[0]
+    ocf_after_int = ocf_latest - fe_int
+    capex_latest = capex[0]
+    book_eq_val = snapshot.get("book_equity")
+    nd_val = snapshot.get("net_debt")
+    roe_latest = (profits[0] / book_eq_val) if (book_eq_val is not None and book_eq_val > 0) else None
+    if archetype in ("bank", "non_bank_fin"):
+        roic_est = roe_latest
+    elif book_eq_val is not None and book_eq_val > 0:
+        ic_est = max(book_eq_val * 0.25, book_eq_val + (nd_val if nd_val is not None else 0.0))
+        roic_est = profits[0] / ic_est
+    else:
+        roic_est = None
+    buyback_mm = max(0.0, args.buyback * 100.0)  # 亿元 → 百万元
+
+    cfg = {"schema_version":3,"model_mode":"v3_look_through","industry_archetype":archetype,
+           "company":args.company,"code":args.code,"date":str(daily[date_col].max().date()),
            "price":price,"market_cap":cap,"shares":shares,"quote_fx":args.quote_fx,"net_profit_C":profits[0],"depreciation_D":depreciation[0],
-           "capex_ratio_G":g,"profit_discount_k":.8,"payout_M":payout,"payout_M_min":min(m2) if m2 else None,
-           "payout_M_mean":sum(m2)/len(m2) if m2 else None,"aa_2y":sum(surplus[:2])/2,"aa_all":sum(surplus)/len(surplus),
+           "capex_ratio_G":g,"total_capex_ratio_G":g,"maint_capex_ratio_gamma":maint_gamma,"gamma_maint":maint_gamma,
+           "profit_discount_k":.8,"payout_M":payout,"payout_M_min":min(m2) if m2 else None,
+           "payout_M_mean":sum(m2)/len(m2) if m2 else None,"buyback_amount":buyback_mm,
+           "aa_2y":sum(surplus[:2])/2,"aa_all":sum(surplus)/len(surplus),
+           "ocf_latest":ocf_latest,"capex_latest":capex_latest,"fe_interest_expense":fe_int,"ocf_after_interest":ocf_after_int,
+           "roe_latest":roe_latest,"roic_est":roic_est,
            "rf":args.rf,"cycle_adjust_pct":0,"base_revenue":revenues[0],"lambda":lam,"surplus_series":surplus,
            "lambda_policy":lambda_policy,"lambda_reliable":reliable,
            "lambda_diagnostics":lambda_diagnostics,"financial_years":years,
@@ -297,15 +325,20 @@ def main():
         for key,value in (("payout_M_fwd",args.m_fwd),("profit_discount_k_fwd",args.k_fwd),("aa_fwd",args.aa_fwd*100 if args.aa_fwd is not None else None)):
             if value is not None:
                 cfg[key]=value
-    notes = [f"# 穿透回报率输入判断说明（{args.company} {args.code}）", "",
-             f"财务期：{cfg['financial_period']}；行情日：{cfg['date']}；股本来源：{shares_source}。",
-             "机器JSON金额单位为百万元。所有缺失保留null，确认判断点后再运行计算器。", "",
-             f"G建议：{g}；近三年Capex/D：{g_ratios}", f"支付率法2：{m2}；法1：{m1}；采纳M：{payout}",
-             f"λ段值：{segments}；有效λ：{lam}", "", "## 公式及来源",
+    roic_pct_txt = f"{roic_est*100:.2f}%" if roic_est is not None else "未知"
+    roe_pct_txt = f"{roe_latest*100:.2f}%" if roe_latest is not None else "未知"
+    notes = [f"# 穿透回报率法 v3（Look-Through Return Method）输入与口径说明（{args.company} {args.code}）", "",
+             f"财务期：{cfg['financial_period']}；行情日：{cfg['date']}；股本来源：{shares_source}；行业原型：{archetype}；模型模式：v3_look_through。",
+             "机器 JSON 内部金额保持原生尺度；主报告及对外正文必须换算为亿元／万元，确认人工判断点后再运行计算器。", "",
+             f"总资本开支强度 γ_total（历史G代理）：{g}；近三年 Capex/D：{g_ratios}；v3 维持性系数 γ_maint：{maint_gamma}",
+             f"经营现金流 OCF_latest：{ocf_latest:.2f}（扣费用化利息 {fe_int:.2f} → {ocf_after_int:.2f}）；Capex_latest：{capex_latest:.2f}",
+             f"广义分配率 p_dist：分红支付率法2={m2}；法1={m1}；采纳保守分红锚 p_div={payout:.4f}；注销式回购={buyback_mm:.2f}",
+             f"资本回报估计：ROE_latest={roe_pct_txt}；ROIC_est={roic_pct_txt}",
+             f"经营杠杆 λ 段值：{segments}；有效λ：{lam}", "", "## 公式及来源",
              *[f"- {key}: {value}" for key,value in snapshot["formula_sources"].items()], "", "## 需核实及警告",
              *["- "+warning for warning in warnings], "",
              "不得将营运资本当现金保护，不得把货币资金命名为净现金。",
-             "核实维持性开支、支付率承诺、AA窗口、Rf、现金/融资范围、普通股权益、低价复权证据。"]
+             "请核实维持性开支系数 γ_maint、注销式回购金额、分红承诺底线、无风险利率 Rf、现金/债务范围、普通股权益及十年复权低价证据。"]
     from run_support import atomic_json
     atomic_json(out/"穿透回报率_输入.json",cfg)
     (out/"输入_判断点说明.md").write_text("\n".join(notes)+"\n",encoding="utf-8")

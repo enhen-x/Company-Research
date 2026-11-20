@@ -16,7 +16,7 @@ description: "证券调研 v3 统一流水线：固定研究框架、Markdown �
 
 **统一执行契约**：所有批次按 `references/flow-contract.md` 执行。主报告以 Markdown 为唯一正文源，主报告 HTML 统一由 `scripts/md_to_html.py` 生成；`scripts/report_to_html.py` 仅用于 `shared/qualitative/` 的旧版商业质量仪表盘，不得用于统一主报告。批次内不得新增同功能临时脚本。
 
-用户只需给出 `调研 <公司名或股票代码>`（如“调研 温氏股份”“调研 300498”），本技能自动完成 B1-B3 阶段（立项、拉数、审计），再由 Agent 按券商深度标准完成 B4-B6（八步分析、交叉验证、结论输出），并内置龟龟 Phase 3 穿透回报率估值与仓位纪律。
+用户只需给出 `调研 <公司名或股票代码>`（如“调研 温氏股份”“调研 300498”），本技能自动完成 B1-B3 阶段（立项、拉数、审计），再由 Agent 按券商深度标准完成 B4-B6（八步分析、交叉验证、结论输出），并内置**穿透回报率法（Look-Through Return Method v3）**估值与仓位纪律。
 
 ## 合并说明：原三技能 → 本技能三个模块
 
@@ -24,7 +24,7 @@ description: "证券调研 v3 统一流水线：固定研究框架、Markdown �
 |--------|-----------|------|
 | company-research | 本技能主体（B1-B6 流水线） | 自动化流水线、数据拉取与审计、脚本执行、报告产出物管理 |
 | securities-analysis | `references/证券分析方法论.md`、`估值方法详解.md`、`行业与公司分析框架.md`、`财务分析与预测.md`、`report-template.md` | 格雷厄姆/胡克方法论、八步分析框架、四种估值方法（DCF/相对价值/并购/LBO）、统一主报告结构标准 |
-| guigui-valuation-report | `strategies/`、`prompts/`、`shared/`、`references/methodology.md`、`scripts/calc_penetration_return.py` 等 | 龟龟穿透回报率估值（Phase 3）、商业质量分析、独立估值、选股器 |
+| 穿透回报率估值（Look-Through v3） | `strategies/turtle/`（兼容入口）、`references/methodology.md`、`scripts/calc_penetration_return.py` | **穿透回报率法 v3（Look-Through Return Method）**：以维持性现金底座 $OE_{\text{cash}}$ + 分红回购 $p_{\text{dist}}$ + 经 ROIC 校验的留存复利 $\eta$ 覆盖全行业，配商业质量与选股器 |
 
 **口径冲突处理（强制）**：合并后所有口径冲突一律按 `references/framework.md` §D0《三技能协同报告标准决议》（2026-08-12 拍板）执行——十部分主干 / R_eff 现金纪律＋行业适用主方法与验证锚 / 三情景+敏感性双轨 / 固定 18 类图号（不适用按原豁免） / G1-G21 + G9-TEMPLATE + G22 门控，不再现场折中。
 
@@ -162,7 +162,7 @@ python scripts/tushare_collector.py --code 600887.SH --backend auto --output out
 
 **行业成本—价格数据（B2.2，乳制品等成本驱动行业必做）**：伊利股份等乳企必须运行 `scripts/fetch_industry_cost_price.py --dir . --profile dairy` 生成 `data/行业成本价格.csv`（生鲜乳收购价 role=cost + 鲜奶零售价 role=price，可加 volume 产量/存栏序列与 margin 价差序列，≥3 年真实历史、双源交叉验证）并审计通过；报告 §2 宏观与行业 必须嵌入 **图16 行业成本与价格走势**（analyze_charts.py v3：供需下方面板 + 成本/价格原始值双轴 + 价差示意，每序列只画自身观测点无断点、横坐标稀疏刻度不重合）。
 
-**穿透回报率估值（龟龟 Phase 3）必需数据**：① 分红送配记录（支付率法2与DPS校验，接口 `ak.stock_fhps_detail_em`）；缺失时从公告核实或明确保留未知，**不得直接用含偿付利息的 `ASSIGN_DIVIDEND_PORFIT` 替代支付率**。② 10年复权+不复权行情；未核实十年覆盖与复权口径时低价锚保持null。③ 无风险利率 Rf（中国10年期国债，A股；港股/美股用当地Rf），缺失时用估计值并必须进 Warnings。
+**穿透回报率估值（Look-Through v3）必需数据**：① 分红送配记录（支付率法2与DPS校验，接口 `ak.stock_fhps_detail_em`，有注销式回购时一并提取）；缺失时从公告核实或明确保留未知，**不得直接用含偿付利息的 `ASSIGN_DIVIDEND_PORFIT` 替代支付率**。② 10年复权+不复权行情；未核实十年覆盖与复权口径时低价锚保持null。③ 无风险利率 Rf（中国10年期国债，A股；港股/美股用当地Rf），缺失时用估计值并必须进 Warnings。
 
 ### B3 数据审计（自动）
 
@@ -192,7 +192,7 @@ B3 完成后自动运行 `scripts/financial_health_check.py`，生成 `reports/�
 
 **研究专题（行业选型后按需读取）**：先读 `references/research-topics.md` 的行业与章节映射，再加载适用的指引/订单、驱动预测和反方验证规则。统一输入 `input/研究模型.json`，运行 `python scripts/research_topics.py --dir .` 得到 `reports/研究模型_输出.json`，将结果写入现有 §2/§3/§4/§5/§6/§8/§9；不得新增报告章节、小节或图号。未完成项标记 `INCOMPLETE` 并披露影响，不为过门造数；基础报告仍可如实成稿，技术通过不等于研究通过。
 
-> **输出边界（强制）**：B4 八步为**纯计算/分析层**——只产出可复算数字与固定图表；已有脚本优先，专题只维护一份输入和一份 JSON 输出，**不产成文正文**；步骤7 仅出数字表（评级/三情景目标价矩阵/龟龟目标买入价/门槛价格/仓位推导链的数字），禁止写成文句子；步骤8「综合报告」仅为过程终点汇总，不独立成文，归入 B6.2。所有文案级输出（评级/目标价/投资建议/综合报告/摘要）一律在 **B6.2 唯一成文点** 成文（按 framework.md §D1 十部分）。
+> **输出边界（强制）**：B4 八步为**纯计算/分析层**——只产出可复算数字与固定图表；已有脚本优先，专题只维护一份输入和一份 JSON 输出，**不产成文正文**；步骤7 仅出数字表（评级/三情景目标价矩阵/穿透目标买入价/下行保护参考价/仓位推导链的数字），禁止写成文句子；步骤8「综合报告」仅为过程终点汇总，不独立成文，归入 B6.2。所有文案级输出（评级/目标价/投资建议/综合报告/摘要）一律在 **B6.2 唯一成文点** 成文（按 framework.md §D1 十部分）。
 
 **八步内容（securities-analysis 方法论，详见 references/）**：
 
@@ -215,7 +215,7 @@ B3 完成后自动运行 `scripts/financial_health_check.py`，生成 `reports/�
 6. **治理与关联交易量化**：股权结构、股权纠纷/减持跟踪路径；重大并购量化对价/现金支付/可辨认净资产/新增商誉/占净资产比例/分部影响/整合里程碑，并说明对 FCFE、净债务和商誉减值的影响。
 7. **风险概率与资本结构方法学**：每个风险给概率并注明方法（历史频率/情景推演/趋势外推/规模约束/事件驱动）；负债率不能直接等同于高杠杆，拆分有息/租赁/经营性负债；OCF/净利高不直接等同盈利质量高。
 8. **预测与估值逻辑审计**：成稿前反向复算“事实 → 假设 → 模型 → 目标价 → 评级”因果链；所有表格最低值、正文尾部目标价、风险回撤和概率加权目标价必须可由同一组输入复算。
-9. **穿透回报率估值（龟龟 Phase 3，基本面分析必做）**：见下方“龟龟 Phase 3 穿透回报率估值”章节。**必须运行** `scripts/calc_penetration_return.py --config 输入.json` 复算，禁止手算。
+9. **穿透回报率估值（Look-Through Return Method v3，基本面分析必做）**：见下方“穿透回报率法 v3”章节。**必须运行** `scripts/calc_penetration_return.py --config input/穿透回报率_输入.json --v3 --json --out reports/穿透回报率_输出.json` 复算，禁止手算。
 
 **SOTP 分部估值（B4.6，平台型公司强制）**：运行 `scripts/sotp_valuation.py --detect-only` 自动检测 + 计算，输出 `reports/sotp_输出.json`，产出图18。
 
@@ -249,7 +249,7 @@ B3 完成后自动运行 `scripts/financial_health_check.py`，生成 `reports/�
 ### B6 结论与交付
 
 - **B6.1 交付清单核对**：按 `交付清单.md` 三节逐项核对（B1-B3 自动产出 / B4-B6 交付物 / 成稿门控）。
-- **B6.2 唯一成文点**：评级/目标价/投资建议/综合报告/一页摘要在此成文，且必须逐项套用 `references/report-template.md`（十部分：投资摘要/宏观与行业/公司/财务/盈利预测/估值/投资建议与目标价/催化剂与跟踪/风险与反证/附录）。“估值”章节内嵌穿透回报率估值小节；“投资建议”同时给出市场/券商 12 个月目标价与龟龟目标买入价/门槛价格/仓位建议；每章末尾必须有 `**本节结论**` 和 `> 数据依据：`。
+- **B6.2 唯一成文点**：评级/目标价/投资建议/综合报告/一页摘要在此成文，且必须逐项套用 `references/report-template.md`（十部分：投资摘要/宏观与行业/公司/财务/盈利预测/估值/投资建议与目标价/催化剂与跟踪/风险与反证/附录）。“估值”章节内嵌穿透回报率估值小节；“投资建议”同时给出市场/券商 12 个月目标价与穿透目标买入价/下行保护价格/仓位建议；每章末尾必须有 `**本节结论**` 和 `> 数据依据：`。
 - **跟踪闭环（v2 档案版）**：交付时必须有跟踪验证台账（`references/tracking_template.md`）与复验脚本（`scripts/verification.py`）；下次复验（建议 1 个季度后）先读根目录 `财报更新验证.md` 上一批次档案的预测假设，按台账协议刷新数据、逐项对照预测与实际、归因偏差（数据/审计/预测校准/估值/穿透回报率/结论纪律），把方法论问题写回 framework.md/SKILL.md，并回填新批次档案（偏差 >15% 或触发翻转点 → 更新滚动预测与评级）。
 
 ### E 成稿前质量审计清单（强制）
@@ -258,8 +258,8 @@ B3 完成后自动运行 `scripts/financial_health_check.py`，生成 `reports/�
 - 结论可追溯：目标价推导链、估值倍数来源、关键数字来源+日期。
 - 预测禁止曲棍球棒；周期股包含有依据的下行路径；行业驱动连接利润、现金/资本约束，并核查指引版本、订单转化、季节性与剩余期要求；反方证据须能追到假设和动作。
 - DCF 必须遵守 FCFE/FCFF 二选一规则；不能将孤立 FCF、混用折现率或高终值占比包装成精确内在价值。
-- **穿透回报率纪律**：基本面分析必须包含龟龟 Phase 3 模块并运行计算脚本；结余（AA）口径变化必须说明理由；外推可信度与价值陷阱评级必须有数据/定性证据支撑，不得臆造；Rf 缺失时用估计值并标注影响幅度（±0.5pct → 门槛 II ±0.5pct）。
-- **成长校准轨（2026-08-21 新增）**：高成长标的（净利增速 >15% 或保守轨目标买入价 < 现价×0.6）必须并列输出龟龟成长校准轨（forward）——C_fwd/M_fwd/k_fwd → R*_fwd、KK_fwd、目标买入价_fwd 与「成长验证买入区」；评级锚仍为保守轨 trailing，成长校准轨不得推翻保守轨不建仓结论，升级须由实际数据（中报/季报/合同负债）验证触发。
+- **穿透回报率纪律**：基本面分析必须包含穿透回报率 v3 模块并运行计算脚本；维持性现金底座 $OE_{\text{cash}}$、留存转化率 $\eta$ 与历史自由现金结余变化必须说明依据；外推可信度与价值陷阱评级必须有数据/定性证据支撑，不得臆造；Rf 缺失时用估计值并标注影响幅度（±0.5pct → 门槛 $R_{\text{req}}$ ±0.5pct）。
+- **前瞻校准轨**：高成长标的（净利增速 >15% 或即期穿透买入价 < 现价×0.6）可并列输出前瞻盈利校准（forward）——$NP_{\text{fwd}} / p_{\text{dist,fwd}} / \alpha_{\text{fwd}}$ 与「前瞻验证买入区」；已实现财务口径仍为核心依据，实绩未验证前不得推翻主轨不建仓结论。
 - **市场适用性**：门槛 II=max(3.5%, Rf+2%) 的 3.5% 下限为 A 股校准值；港股/美股用当地 Rf+2% 并标注调整。
 - **逻辑审计门控**：因果链、经营闭环、时间口径（H1 覆盖率、Q4 季节性、不混用季度/年度/TTM）、DCF 口径、可比口径、安全边际假设重叠披露、风险复算、并购与财务质量、穿透回报率口径、仓位纪律（“KK → 可信度 → 陷阱风险”完整推导链；GG≤II 不得建仓；目标买入价与券商目标价口径分离标注）。
 - **禁止在项目文件夹外写临时脚本**：所有分析/复验/图表/数据清洗/临时调试脚本必须写入项目文件夹下的 `scripts/` 目录，不得在项目根目录或其他非项目目录创建任何 `.py`/`.ipynb`/`.bat`/`.ps1` 等可执行或临时脚本文件。
@@ -270,47 +270,43 @@ B3 完成后自动运行 `scripts/financial_health_check.py`，生成 `reports/�
 
 关键门控：G1 数据完整性 / G2 数据一致性 / G3 支付率口径 / G4 AA 口径 / G5 |HH|<2pct / G6 R_eff vs II / G7 脚本复算（含 g_grid）/ **G8 图表质量**（+G8-SENS 图11契约、G8-INDUSTRY 行业图表、G8-OPS 图06/图15 数据契约、G8-VALUATION-BAND PE/PB 逐时点区间契约、G8-RENDER 渲染级门控）/ **G9-TEMPLATE 报告章节完整** / G10 图表 ≥10 张 / G11 关键数字有来源+日期 / G12 脚本全部在 scripts/ 内 / … / G21 / **G22 本期财报体检**。全部无 FAIL 才可交付；WARN 逐条进交付清单。旧批次只能显式使用 `--legacy` 跳过 G9-TEMPLATE/G22。
 
-## 龟龟 Phase 3 穿透回报率估值（核心模块）
+## 穿透回报率法 v3（Look-Through Return Method，核心模块）
 
-### 适用性与例外（必读）
+### 行业全谱系适配规则（v3，2026-11-20 升级）
 
-标准穿透回报率公式（主口径 R* = 归母净利 C × 折扣系数 k × 支付率 M / 市值；现金校验 GG = 真实可支配现金 AA × M / 市值）主要适用于**非金融行业**（工业制造、消费品、医药、科技等）且具备明确 Capex、折旧、经营现金流可辨识的公司。
+穿透回报率法 v3 已将原纯分红公式升级为**跨行业普适广义穿透回报率**：基于**维持性现金股东盈余（$OE_{\text{cash}}$）**过滤假利润，同时对**现金分红+注销回购（$p_{\text{dist}}$）**与**经现金流与资本效率双重校验的高 ROIC/ROE 留存复利（$\eta$）**定价。阶段 2 Capex 与分红跃迁引擎另作为**预期差维度**分析，不混入本基础模型。
 
-| 行业 | 问题 | 适配方案 |
-|------|------|---------|
-| **银行** | OCF 含客户存贷款变动；无传统 Capex/折旧；真实可支配现金由监管资本约束 | 以**可持续股息率**替代 R*/GG 链条，股息覆盖率验证；PB-ROE 交叉确认；DDM 辅助估值 |
-| **保险** | 保费收入 ≠ 一般企业营收；准备金计提主观；投资收益率波动大 | 以**内含价值（EV）+ 新业务价值（NBV）**替代 OE 框架 |
-| **券商** | 盈利高度周期性；自营波动大；资产负债表以金融资产为主 | 以**ROE 周期均值 × PB**锚定，股息率辅助 |
-| **房地产（开发型）** | 合同负债→营收确认时滞；土储重估；高杠杆风险 | 使用**NAV（净资产价值）折让**法 |
+| 行业原型 | 维持性现金底座 $OE_{\text{cash}}$ | 资本效率指标 $\text{ROIC}_{\text{eff}}$ | 留存转化上限 $\eta_{\max}$ | 专项补充与交叉锚 |
+|---|---|---|---|---|
+| **互联网与轻资产科技 (`internet_tech`)** | $\text{OCF}_{\text{扣息}} - 0.80 \cdot D\&A$（剥离 AI/算力扩张 Capex） | $\text{ROIC}_{\text{eff}}$（含注销式回购纳入 $p_{\text{dist}}$） | `0.80` | SOTP 分部 / EV/EBITDA / 现金调整 PE |
+| **消费品与零售 (`consumer`)** | $\text{OCF}_{\text{扣息}} - 0.80 \cdot D\&A$ | $\text{ROIC}_{\text{eff}}$（扣除冗余超额净现金） | `0.80` | 品牌壁垒与渠道存货周转体检 |
+| **制造业与工业 (`manufacturing`)** | $\text{OCF}_{\text{扣息}} - 0.90 \cdot D\&A$（扩产 Capex 不误杀） | $\text{ROIC}_{\text{eff}} = NP / (E + \text{NetDebt})$ | `0.80` | 扩产→收缩期保留 $\gamma_{\text{maint}}$ 敏感性网格 |
+| **商业银行 (`bank`)** | $\min(NP, AA_{2y})$（监管核心一级资本可分配底座） | 净资产收益率 $\text{ROE}$（门槛 $K_{e,\text{fin}}=9.0\%$） | `0.25`（分母 $\max(\text{市值},\text{净资产})$） | 叠加净息差/不良率/拨备覆盖率与 PB-ROE |
+| **非银金融 (`non_bank_fin`)** | 周期平滑稳态盈余（$NP_{\text{norm}} = \min(NP, 1.25 \cdot 5\text{Y均值})$） | 周期平滑后 $\text{ROE}$（门槛 $K_{e,\text{fin}}=9.5\%$） | `0.25`（分母 $\max(\text{市值},\text{净资产})$） | 保险叠加 EV/NBV；券商防牛市顶点高估 |
+| **公用事业与基础设施 (`utility_infra`)** | $\text{OCF}_{\text{扣息}} - 0.90 \cdot D\&A$ | $\text{ROIC}_{\text{eff}}$ | `0.55` | Capex 规划拐点与分红跃迁单独入预期差 B4.7（图19–21） |
+| **现金含金量不达标 / 低效留存防御** | $Cov_{\text{cash}} < 0.85$ 或 $\text{ROIC}_{\text{eff}} < R_{\text{req}} + 2\%$（金融 $\text{ROE} \le K_{e,\text{fin}}$） | — | **强制归零 (`0.0`)** | 含金量不足时直接降级现金分配口径 $R_{\text{cash\_dist}}$ |
 
-> ⚠️ 遇到以上行业必须在报告第 1 章“投资摘要”和第 10 章“附录”中明确标注“标准框架不适用，已采用行业适配方案”并说明适配方法。当 `data_pack_market.md` §17 出现 `AA_2y < 0` 且为金融机构、`|HH| > 5pct`、OCF 正负交替且与盈利趋势无关时，自动触发适配流程。
+### 核心公式链与正式术语（详见 `references/methodology.md`）
 
-### 核心公式链（详见 references/methodology.md）
-
-- **Owner Earnings**：H = D × G（D=折旧摊销，G 依据近 3 年 Capex/D&A 判断）
-- **真实可支配现金 AA**：默认近 2 年均值 AA_2y（5 年均值 AA_all 对比）；现金用**狭义口径**
-- **支付率 M**：法2 = 分配现金 / 归母净利润，近 3 年均值；DPS 连续多年相同**禁止用法1**（承诺/公告最低值优先，无承诺取近 3 年最低档）
-- **粗算 R** = C × M / 市值（主口径 R* = C × k × M / 市值）
-- **精算 GG** = AA × M / 市值（现金校验）
-- **粗算偏差 HH** = R − GG，|HH| ≥ 2pct 需专项调查（>5pct 检查行业归属）
-- **有效口径 R_eff**：默认主口径 R*；Δc ≥ 2pct 时降级为 GG
-- **门槛 II** = max(3.5%, Rf + 2%)（A 股校准值；港股/美股用当地 Rf+2%）
-- **安全边际 KK** = GG − II（弱周期不修正）
-- **目标买入价** = 股价 × GG / II；**门槛价格** = 股价 × II / GG
-- **5 维外推可信度、5 项价值陷阱排查、业绩下滑敏感性表**（单年 ×0.7~×1.0 与逐年 ×0.9^n，含 k*）
-- **绝对估值**：EV/EBITDA、扣除现金 PE、FCF 收益率、净负债/EBITDA、商誉/总资产、股息率、基准价三锚
-- **仓位推导链（强制）**：KK → 可信度 → 陷阱风险，缺一环必须降档或说明；GG ≤ II 时不建仓，输出观望/卖出
+- **维持性资本开支**：$\text{Capex}_{\text{maint}} = D\&A \times \gamma_{\text{maint}}$（$\gamma_{\text{maint}} = \min(\gamma_{\text{total}}, \gamma_{\text{cap}})$）；$OE = NP + D\&A - \text{Capex}_{\text{maint}}$
+- **维持性现金底座 $OE_{\text{cash}}$**：非金融 $\text{OCF}_{\text{扣息}} - \text{Capex}_{\text{maint}}$；金融采用监管可分配盈余与五年周期平滑底座
+- **广义分配率 $p_{\text{dist}}$**：现金分红支付率 $p_{\text{div}}$ + 注销式股份回购率 $p_{\text{buyback}}$
+- **广义主穿透回报率 $R_{\text{LT}}$**：$R_{\text{dist}} + R_{\text{retain}} = \frac{NP_{\text{base}} \cdot \alpha \cdot p_{\text{dist}}}{\text{市值}} + \frac{NP_{\text{base}} \cdot \alpha \cdot (1 - p_{\text{dist}})_+ \cdot \eta}{\text{retain\_denom}}$（非金融取市值；金融取 $\max(\text{市值}, \text{净资产})$ 且须 $\text{ROE} > K_{e,\text{fin}}$）
+- **现金校验率 $R_{\text{cash}}$ 与有效穿透回报率 $R_{\text{eff}}$**：现金含金量合格时取 $R_{\text{LT}}$；含金量不足直接降级现金口径并强制 $\eta=0$
+- **要求回报门槛 $R_{\text{req}}(II)$**：A 股 $\max(3.5\%, R_f + 2\%)$；港股 $\max(5.0\%, R_f + 3\%)$；美股 $\max(4.0\%, R_f + 2\%)$
+- **穿透安全边际 $MoS(KK)$**：$R_{\text{eff}} - R_{\text{req}} + \Delta_{\text{cycle}}$
+- **穿透目标买入价 $P_{\text{buy}}$**：现价 $\times \frac{R_{\text{eff}}}{R_{\text{req}}}$；**下行保护参考价 $P_{\text{floor}}$**：现价 $\times \frac{R_{\text{req}}}{R_{\text{eff}}}$（仅 $R_{\text{eff}} > R_{\text{req}}$ 时有效）
+- **外推可信度 5 维、价值陷阱 5 项、收入敏感性 $k^*$、绝对估值与三锚、仓位推导链（$MoS \rightarrow$ 可信度 $\rightarrow$ 陷阱风险）**：详见 `references/methodology.md`。
 
 ### 计算脚本（确定性，禁止手算）
 
 ```bash
 python scripts/build_penetration_input.py --data <项目>/data --out <项目>/input --company <名称> --code <代码>
-# Phase 3B：自动生成机器字段及判断说明；默认保护已确认输入，重建须显式 --overwrite。
-python scripts/calc_penetration_return.py --config input/穿透回报率_输入.json --json > reports/穿透回报率_输出.json
+# 自动生成 v3_look_through 输入 JSON 及口径判断说明；默认保护已确认人工判断。
+python scripts/calc_penetration_return.py --config input/穿透回报率_输入.json --v3 --json --out reports/穿透回报率_输出.json
 ```
 
-- `--json` 输出为**纯 JSON**（人类可读文本走 stderr），写入 `reports/穿透回报率_输出.json`；**G 敏感性网格（g_grid）由脚本默认输出**，报告中 G 网格行禁止手写。
-- 输入 JSON 字段与口径见 `scripts/build_penetration_input.py` / `calc_penetration_return.py` 头部文档与 `references/penetration-input-guide.md`（8 个易错点 + 7 个判断点清单）。
+- `--json --out` 输出包含 `formal_metrics`（21 项标准金融术语）、`look_through_v3` 与 `legacy_v2` 对照基准的纯 UTF-8 JSON；**维持性资本开支敏感性网格（`g_grid`）由脚本自动生成**，报告中禁止手写网格行。
 
 ## 商业质量分析（PDF-first 6 维度）
 

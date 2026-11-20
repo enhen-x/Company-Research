@@ -1,6 +1,17 @@
 ﻿# Changelog
 
-## 2026-11-13 — 阶段 2「Capex 与分红跃迁引擎」正式集成（洪城环境/四川成渝/国投电力三标验证）
+## 2026-11-20 — 穿透回报率法 v3（Look-Through Return Method）重构、底层术语正式化与多行业适配
+
+- **方法论边界与底层术语全面正式化**：废除“龟龟”称谓及早期 Excel 列号代号，统一启用 `formal_metrics`（$NP, D\&A, \gamma_{\text{maint}}, OE_{\text{cash}}, p_{\text{dist}}, \alpha, \text{ROIC}_{\text{eff}}, \eta, R_{\text{dist}}, R_{\text{retain}}, R_{\text{LT}}, R_{\text{cash}}, R_{\text{eff}}, R_{\text{req}}, MoS, P_{\text{buy}}, P_{\text{floor}}$）；明确阶段 2「Capex 与分红跃迁引擎」划归**预期差维度**另行统筹。
+- **确定性五步流程与六大行业全谱系适配（`scripts/calc_penetration_return.py` & `build_penetration_input.py`）**：
+  - 确立「原型识别与平滑基数 $\rightarrow$ 维持性现金底座与含金量体检 $\rightarrow$ 分红+注销回购分配核算 $\rightarrow$ 双重校验留存复利 $\eta$ $\rightarrow$ $R_{\text{eff}}/MoS/P_{\text{buy}}$ 定价」五步确定性流程；
+  - 引入**维持性现金股东盈余底座 $OE_{\text{cash}} = \text{OCF}_{\text{扣息}} - D\&A \times \gamma_{\text{maint}}$**（消费/互联网 $\gamma_{\text{cap}}=0.80$、制造/公用 $\gamma_{\text{cap}}=0.90$、金融 $\gamma=0$），剥离扩张性 Capex 导致的自由现金流误杀；
+  - 将**注销式回购**纳入广义分配率 $p_{\text{dist}}$，并在通过现金含金量校验且超越效率门槛后分段计入留存再投资复利 $\eta$（互联网/消费/制造 $\eta_{\max}=0.80$、公用事业 $\eta_{\max}=0.55$；含金量或效率不达标时 $\eta$ 强制归零并降级现金口径）；
+  - **金融板块防高估校准**：商业银行与非银金融引入**金融权益资本成本门槛 $K_{e,\text{fin}}$（银行 `9.0%` / 非银 `9.5%`）**与紧缩留存上限 $\eta_{\max}=0.25$（仅超越 $K_{e,\text{fin}}$ 的超额 ROE 才计入复利），且计算金融留存项 `r_retain` 时分母取 $\max(\text{市值}, \text{净资产})$ 消除破净股 $\text{PB}<1$ 的 $1/\text{PB}$ 虚增悖论；非银金融同步启用 $\min(NP, 1.25 \times 5\text{Y均值})$ 周期平滑防牛市高点虚高；
+  - 顶层保留 `legacy_v2` 兼容及 `--v3` / `model_mode="v3_look_through"` 切换，`growth_calib` 前瞻轨同步对齐金融 `retain_denominator`。
+- **门控、文档、测试与验证**：`report_template_qc.py` 支持正式与历史双术语校验；`analyze_charts.py` / `template_regression.py` / `research_pipeline.py` / `references/methodology.md` / `references/report-template.md` / `references/framework.md` / `SKILL.md` / `README.md`（写入五步流程与六大行业参数表、替换“龟龟”称谓）全面更新；验证通过 `calc_penetration_return.py --selftest`、`tests/test_look_through_v3_multi_industry.py`（6/6 OK）与 `template_regression.py`（`FAIL=0 WARN=4 rc=0`），并完成银行/非银/互联网/制造/消费/公用事业 6 大行业 11 家典型标的实测校准。
+
+## 2026-11-13 — 阶段 2「Capex 与分红跃迁引擎（预期差维度）」正式集成（洪城环境/四川成渝/国投电力三标验证）
 
 - **新增生产级模块 `scripts/capex_dividend_engine.py`**：支持 `--dir . --init-template` 基于三表与分红 CSV 生成 `input/capex_dividend_plan.json` 模板，正常执行时严格从原始 CSV 提取分红实施记录（支持年度/中期合计）与股价序列，生成 **图19（Capex全景+前复权股价与分红实施联动，§4.2）**、**图20（重大在建工程转固时间轴，§4.2）**、**图21（分红可行性与造血留存走向，§6.4）**、结构化 `reports/capex_dividend_analysis.json` 与可直接嵌入主报告的 `reports/Capex与分红跃迁专项.md`。
 - **会计与口径校准**：将自由现金流覆盖倍数统一为同合并扣息口径 `(OCF - Capex - 费用化利息) / 合并净利润`，解决非全资核心子公司（如雅砻江水电等）导致的合并现金流除归母利润畸高及 `OCF` 未扣利息问题；每张图仅保留本公司法定保底分红线 + 70% 跃迁线（+ 条件性 100% 覆盖线）并叠加历年实际分红率点线。

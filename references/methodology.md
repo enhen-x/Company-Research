@@ -1,74 +1,86 @@
-# 穿透回报率估值方法论（龟龟投资策略 v2）
+# 穿透回报率估值方法论（Look-Through Return Method v3）
 
-> 本文档是 SKILL.md 的详细版：全部公式、阈值与决策规则，并附凌霄泵业（002884）已校准示例。报告组装顺序见 `report-template.md`。
+> 本文档是 SKILL.md 的详细版：全部正式金融术语、数学公式、跨行业维持性现金底座与决策规则，并附凌霄泵业（002884）已校准示例。报告组装顺序见 `report-template.md`。
+> 2026-11-20 重大升级（v3）：全面废除“龟龟”称谓与 Excel 列号缩写（`C/D/G/H/M/AA/FF/R*/GG/HH/II/JJ/KK` 仅作为 JSON 底层兼容别名）；构建以**维持性现金股东盈余（$OE_{\text{cash}}$）**为底座、兼容**现金分红+注销回购+经 ROIC 双重校验留存复利（$\eta$）**的广义穿透回报率模型（Look-Through Return Method v3），覆盖银行、非银金融、互联网科技、制造业、消费品与公用事业六大行业原型。Capex 规划与分红跃迁引擎（Stage 2）另归入**预期差维度**讨论，不混入内生基础穿透模型。
 > 2026-10-30修订：λ估计与可靠性分开。保留历史逐段斜率均值作条件敏感性参考，低可靠性不输出k*，不再将不稳定估计强制置零；覆盖2026-08-15旧版的λ=0兜底规定。
 
 ## 目录
 
-1. 符号与口径
-2. 穿透回报率（OE / R* / R / GG / II / KK）
+1. 正式符号、JSON 键名与口径对照
+2. 穿透回报率模型 v3（$OE_{\text{cash}}$ / $p_{\text{dist}}$ / $\eta$ / $R_{\text{LT}}$ / $R_{\text{req}}$ / $MoS$）与六大行业适配
 3. 分配能力与分配意愿
 4. 收入敏感性（λ 与 k*）
 5. 外推可信度（5维）
 6. 价值陷阱排查（5项）
-7. 股价位置与目标买入价
+7. 股价位置与穿透目标买入价
 8. 业绩下滑敏感性表
 9. 绝对估值与基准价
 10. 仓位决策
 11. 监控与止损
 12. 已校准示例（凌霄泵业 002884）
 
-## 1. 符号与口径
+## 1. 正式符号、JSON 键名与口径对照
 
-| 符号 | 含义 | 默认口径 |
-|---|---|---|
-| C | 归母净利润（GAAP） | 近1年；扣非仅作对比 |
-| D | 折旧与摊销 | 近1年 |
-| G | 维持性Capex系数 | 轻资产0.7~0.9；需给依据（近3年Capex/D&A）；**扩产→收缩切换期强制 G 网格**：近3年 Capex/D&A 极差 >1.0 时，报告必须输出 G 网格对比（如 0.5/0.7/0.9，即脚本 g_grid 默认档，可由输入 `grid_gs` 覆盖）及其对目标买入价的影响，说明采纳值的阶段依据；网格行由脚本 `scripts/calc_penetration_return.py` 的 g_grid 输出（口径 GG=OE×M/市值，随 G 变；与基准 GG=AA×M/市值 并列、**禁止混用**），**禁止手写/手抄** |
-| H | 维持性Capex = D×G | — |
-| OE | Owner Earnings = C + D − H | — |
-| M | 支付率 | 法2 = 分配现金/归母净利润（优先）；**M 取保守锚**：章程/公告承诺最低值 → 管理层承诺 → 历史稳定（近3年极差<5pct）→ 无规律取近3年最低档 M_min；均值仅交叉参考、禁止当默认锚；DPS **≥3 年完全相同的相同数值**才触发"疑似填充错误"禁用法1（2 年相同 + 支付率连续稳定 = **平滑分红政策**，非数据错误，标注即可）；法1 = DPS/EPS，两法偏差 >5pct 时排除法1 |
-| AA | 真实可支配现金（结余） | 默认近2年均值 AA_2y；5年均值 AA_all 作对比 |
-| FF | 可自由支配现金 | 账面现金扣除受限部分（定期存款等） |
-| k | 利润折扣系数（默认0.8，0.7~0.9） | 强可预测 0.9 / 中 0.8 / 弱 0.7；保守方向取小值 |
-| R* | **主穿透回报率 = C×k×M/市值** | **主估值输入**（打折净利润×最低支付率） |
-| R | 账面口径 = C×M/市值 | 交叉校验 |
-| GG | 现金结余校验 = AA×M/市值 | 校验口径（验证 R* 有真钱支撑；Δc≥2pct 时降级为 GG） |
-| HH | 账面-现金偏差 = R − GG | 正常 < 2pct |
-| Δc | 现金校验偏差 = R* − GG | ≥2pct → 现金验证失败，有效口径降级为 GG |
-| II | 门槛 = A股 max(3.5%, Rf+2%)；港股 max(5%, Rf+3%)；美股 max(4%, Rf+2%) | Rf=当地10年期国债收益率 |
-| JJ | 安全边际 = R_eff − II（R_eff 默认 R*，现金校验失败时为 GG） | 周期性修正后为 KK |
-| λ | 经营杠杆 = Δ结余/Δ收入 | 多年平均 |
-| C_fwd | 前瞻归母净利（未来12个月/下一财年，证据支撑） | 公司指引/券商一致预期下沿/自建驱动桥；增速 ≤ 历史3年最高、净利率 ≤ 历史峰值（禁曲棍球棒） |
-| M_fwd | 前瞻支付率锚 | 默认 = M 保守锚；分红率上行+中期分红承诺可上调至近3年均值（注明依据） |
-| k_fwd | 前瞻折扣系数 | 默认 min(k, 0.85)；前瞻不确定性更高，折扣不放松 |
-| R*_fwd | 成长校准轨主回报率 = C_fwd×k_fwd×M_fwd/市值 | 与保守轨 R* 并列，禁止混用 |
-| GG_fwd | 成长校准轨现金校验 = AA_fwd×M_fwd/市值 | 可选；Δc_fwd = R*_fwd−GG_fwd ≥2pct 时降级 |
-| KK_fwd | 成长校准轨安全边际 = R*_fwd − II | 仅供"成长验证买入区"参考，不单独触发建仓 |
-| 升级条款 | 成长兑现被实际数据验证后才可用 C_fwd 更新主轨 | 中报/季报归母 ≥ 预测阈值 + 现金流/合同负债同步确认 |
-| k* | 临界收入倍数（现金口径 GG(k)=II 时） | k*<0、k*≥1 或 λ 不可靠（§4 协议）时失效，只作定性解读 |
+| 正式中文术语 | 正式符号 | `formal_metrics` JSON 键 | 底层兼容别名 | 口径与取值约束 |
+|---|---|---|---|---|
+| 归母净利润 | $NP$ | `net_profit_NP` | `net_profit_C` / `C` | 近1完整财年；非银金融采用 $\min(NP, 1.25 \times 5\text{Y均值})$ 抑制牛市顶点虚高 |
+| 折旧与摊销 | $D\&A$ | `depreciation_DA` | `depreciation_D` / `D` | 固定资产、无形资产与使用权资产摊销；金融业为 0 |
+| 总资本开支强度 | $\gamma_{\text{total}}$ | `total_capex_intensity` | `capex_ratio_G` | 近 3 年 $\text{Capex}_{\text{total}}/D\&A$；**扩产→收缩切换期保留敏感性网格** |
+| 维持性资本开支系数 | $\gamma_{\text{maint}}$ | `maint_capex_factor_gamma` | `G` | 维持现有规模与竞争力的资本开支占 $D\&A$ 比例：消费/互联网上限 $0.80$、制造/公用上限 $0.90$、金融 $=0$ |
+| 维持性资本开支 | $\text{Capex}_{\text{maint}}$ | `maint_capex_amount` | `H` | $D\&A \times \gamma_{\text{maint}}$（超出部分为扩张性资本开支，不再误杀经营现金校验） |
+| 账面股东盈余 | $OE$ | `owner_earnings_OE` | `OE` | $NP + D\&A - \text{Capex}_{\text{maint}}$ |
+| 维持性现金股东盈余 | $OE_{\text{cash}}$ | `maint_cash_owner_earnings` | — | 非金融：$\text{OCF}_{\text{扣息}} - \text{Capex}_{\text{maint}}$；银行：$\min(NP, AA_{2y})$；非银：周期平滑稳态盈余 |
+| 历史自由现金结余 | $FCF_{\text{surplus}}$ | `free_cash_surplus` | `aa_2y` / `AA` | 扣除全部 Capex 后的历史可支配现金结余均值（敏感性压力测试仍沿用全口径严苛底座） |
+| 广义股东分配率 | $p_{\text{dist}}$ | `total_distribution_ratio_p` | `payout_M` / `M` | 现金分红支付率 $p_{\text{div}}$ + 注销式股份回购率 $p_{\text{buyback}}$；分红保守锚优先承诺最低值→近3年最低档 |
+| 盈利确定性折算系数 | $\alpha$ | `profit_reliability_alpha` | `profit_discount_k` / `k` | 强可预测 $0.9$ / 中 $0.8$ / 弱 $0.7$；默认 $0.8$ |
+| 有效投入资本回报率 | $\text{ROIC}_{\text{eff}}$ | `effective_capital_return` | — | 非金融：$\frac{NP_{\text{base}}}{\max(0.25 \cdot E, E + \text{NetDebt})}$ 或显式 `roic`；金融：$\text{ROE} = \frac{NP_{\text{base}}}{\text{BookEquity}}$ |
+| 留存再投资转化率 | $\eta$ | `reinvestment_efficiency_eta` | — | 非金融当现金合格且 $\text{ROIC}_{\text{eff}} \ge R_{\text{req}} + 2\%$ 时分段赋予（$0 \sim 0.80$）；**金融须超越权益资本成本 $K_{e,\text{fin}}$（银行 $9.0\%$ / 非银 $9.5\%$）且上限 $\eta_{\max}=0.25$**；不达标强制归零 |
+| 直接分配穿透回报率 | $R_{\text{dist}}$ | `direct_distribution_return` | — | $\frac{NP_{\text{base}} \times \alpha \times p_{\text{dist}}}{\text{MarketCap}}$ |
+| 留存复利穿透回报率 | $R_{\text{retain}}$ | `retained_compounding_return` | — | 非金融：$\frac{NP_{\text{base}} \times \alpha \times (1 - p_{\text{dist}})_+ \times \eta}{\text{MarketCap}}$；**金融（破净折价约束）：分母取 $\max(\text{MarketCap}, \text{BookEquity})$** |
+| 广义主穿透回报率 | $R_{\text{LT}}$ | `look_through_return_R_LT` | `R_star` (v3模式) | $R_{\text{dist}} + R_{\text{retain}}$ |
+| 维持性现金穿透校验率 | $R_{\text{cash}}$ | `maint_cash_return_R_cash` | `GG` | 基于 $OE_{\text{cash}}$ 的全口径/分配现金校验率 |
+| 有效穿透回报率 | $R_{\text{eff}}$ | `effective_look_through_return` | `r_eff` | 现金校验通过取 $R_{\text{LT}}$（偏差 $\ge 2\%$ 取保守校准值）；含金量不足直接降级为现金分配口径 $R_{\text{cash\_dist}}$ |
+| 要求回报率门槛 | $R_{\text{req}}$ | `required_return_threshold` | `II` | A股 $\max(3.5\%, R_f+2\%)$；港股 $\max(5.0\%, R_f+3\%)$；美股 $\max(4.0\%, R_f+2\%)$ |
+| 穿透安全边际 | $MoS$ | `margin_of_safety_MoS` | `KK` / `JJ` | $R_{\text{eff}} - R_{\text{req}} + \Delta_{\text{cycle}}$ |
+| 穿透目标买入价 | $P_{\text{buy}}$ | `target_buy_price` | `target_buy` | $\text{Price} \times \frac{R_{\text{eff}}}{R_{\text{req}}}$ |
+| 下行保护参考价 | $P_{\text{floor}}$ | `downside_floor_price` | `floor_price` | $\text{Price} \times \frac{R_{\text{req}}}{R_{\text{eff}}}$（仅 $R_{\text{eff}} > R_{\text{req}}$ 时有效） |
+| 前瞻归母净利 | $NP_{\text{fwd}}$ | — | `net_profit_C_fwd` | 未来12个月有证据支撑盈利（公司指引/一致预期下沿/驱动桥），禁止曲棍球棒 |
+| 临界收入倍数 | $k^*$ | `k_star` | `k_star` | 现金情景降至门槛的临界收入倍数；$<0$ / $\ge 1$ 或 $\lambda$ 不可靠时置 null 仅定性解读 |
 
-本方法计算输入与既有JSON金额采用百万元，内部尺度保持不变；对外主报告、表格、图注和阅读台账必须同时换算数值与单位为亿元／万元，自适应单位逐格写明。每股统一为元；比率报告中统一用 % 展示。
+本方法计算输入与既有JSON金额保持原内部尺度；对外主报告、表格、图注和阅读台账必须同时换算数值与单位为亿元／万元，自适应单位逐格写明。每股统一为元；比率报告中统一用 % 展示。
 
-## 2. 穿透回报率
+## 2. 穿透回报率模型 v3（核心公式与六大行业适配）
 
 ```text
-H  = D × G
-OE = C + D − H
-R* = C × k × M / 市值        # 主穿透回报率（打折净利润×最低支付率）——主估值输入
-R  = C × M / 市值            # 账面口径（交叉校验）
-GG = AA × M / 市值            # 现金结余校验口径（验证 R* 有真钱支撑）
-HH = R − GG                  # 账面-现金偏差 |HH| ≥ 2pct → 专项调查
-Δc = R* − GG                 # 现金校验偏差：≥2pct → 现金验证失败，R_eff 降级为 GG
-R_eff = R*（默认）；Δc ≥ 2pct 时 R_eff = GG
-II = max(3.5%, Rf + 2%)   # A股；港股 max(5%, Rf+3%)；美股 max(4%, Rf+2%)
-JJ = R_eff − II
-KK = JJ（周期性修正后）       # 弱周期不调整；强周期按周期位置说明调整依据
-目标买入价 = 股价 × R_eff / II
-门槛价格   = 股价 × II / R_eff
+1. 维持性现金底座（剥离扩张性 Capex 错杀，严抓假利润）：
+   γ_maint = 0（金融）或 min(γ_total, γ_cap)（消费/互联网 0.80；制造/公用 0.90）
+   Capex_maint = D&A × γ_maint
+   OE_cash     = OCF_扣息 − Capex_maint   （银行 min(NP, AA_2y)；非银周期平滑）
+   Cov_cash    = OE_cash / (NP_base × α)  （< 0.85 或分配偏差 ≥ 2pct → 现金含金量不合格！）
+
+2. 留存再投资转化率 η ∈ [0, η_max] 与金融权益成本校准：
+   - 互联网/消费/制造业（ROIC_eff ≥ R_req + 2%）：η = min(0.80, 0.80 × (ROIC_eff − R_req) / 15%)
+   - 公用事业/基础设施（ROIC_eff ≥ R_req + 2%）：η = min(0.55, 0.55 × (ROIC_eff − R_req) / 12%)
+   - 商业银行（Ke_fin = max(9.0%, R_req + 2%)）：η = min(0.25, 0.25 × max(0, ROE − Ke_fin) / 5%)
+   - 非银金融（Ke_fin = max(9.5%, R_req + 2%)）：η = min(0.25, 0.25 × max(0, ROE_norm − Ke_fin) / 5%)
+   - 金融板块高杠杆监管成本 + 破净折价保护：当 ROE ≤ Ke_fin 时 η=0（留存仅补足核心资本/偿付能力平价）；且金融计算留存项分母取 max(市值, 归母净资产)，防止 PB<1 时按 1/PB 虚增留存收益。
+   - 含金量不合格 / 未过门槛：η 强制归零（铁血防守，自动退化回纯分红收息公式）
+
+3. 广义穿透回报率与安全边际：
+   R_dist   = NP_base × α × p_dist / 市值         （分红 + 注销式回购）
+   R_retain = NP_base × α × max(0, 1 − p_dist) × η / retain_denom  （非金融=市值；金融=max(市值, 净资产)）
+   R_LT     = R_dist + R_retain
+   R_cash   = OE_cash × p_dist / 市值 + OE_cash × max(0, 1 − p_dist) × η / retain_denom
+   R_eff    = 含金量合格时取 R_LT（Δc≥2pct 取保守校准值）；含金量不足直接降级为现金分配口径 R_cash_dist
+   R_req    = max(市场下限, Rf + 风险溢价)
+   MoS      = R_eff − R_req + 周期修正
+   P_buy    = 当前股价 × R_eff / R_req
+   P_floor  = 当前股价 × R_req / R_eff （仅当 R_eff > R_req）
 ```
 
-**AA 的逐年计算**（近4~5年）：
+> **方法论边界提示**：阶段 2 的「未来 3 年 Capex 规划曲线、在建转固时间轴与分红率跃迁引擎（图19–图21）」属于**周期拐点与市场预期差**模块，另行在 `§4.2.1` 与 `§6.4.1`（或后续预期差总引擎）中独立列示，不直接混入本节基于已实现财务与资本效率的 `v3_look_through` 内生定价内核。
+
+**历史自由现金结余（用于敏感性压力情景）**（近4~5年）：
 
 ```text
 结余 = 真实现金收入（营业收入） + V1（其他经营现金流入）+ V5（投资现金流入）

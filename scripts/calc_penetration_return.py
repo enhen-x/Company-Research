@@ -1,39 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-'''龟龟投资策略 v2 · Phase 3 穿透回报率估值计算器（确定性，仅标准库）
+'''穿透回报率估值计算器（Look-Through Return Method v3，确定性，仅标准库）
 
 用法：
     python calc_penetration_return.py --config 输入.json
-    python calc_penetration_return.py --config 输入.json --json   # 纯 JSON → stdout（人类可读文本 → stderr），可重定向 > 输出.json
-    python calc_penetration_return.py --selftest                  # 用凌霄泵业数据自检
+    python calc_penetration_return.py --config 输入.json --v3        # 强制使用 v3 广义穿透回报率为主输出
+    python calc_penetration_return.py --config 输入.json --json      # 纯 JSON → stdout（人类可读文本 → stderr）
+    python calc_penetration_return.py --selftest                     # 用凌霄泵业校准基准及 v3 正式指标自检
 
-输出：
-    主穿透回报率 R* = C×k×M/市值（主估值输入）；GG = AA×M/市值 为现金结余校验口径（现金校验偏差 Δc=R*−GG≥2pct 时降级为 GG）；
-    成长校准轨（2026-08-21 新增）：提供 net_profit_C_fwd 时输出 forward 口径
-        R*_fwd = C_fwd×k_fwd×M_fwd/市值、KK_fwd、目标买入价_fwd（解决高成长标的"永远买不到"，
-        纪律：评级锚仍为保守轨 trailing，成长校准轨只给"成长验证买入区"与升级触发，见 methodology §2.1）；
-    G 敏感性网格（g_grid）默认输出——维持性Capex系数 G 的敏感性（近3年 Capex/D&A 极差 >1.0 时报告必出，
-    methodology §1）。口径：oe_yield=OE×M/市值（随 G 变），与基准 GG=AA×M/市值并列、禁止混用；网格GG仅为兼容别名。
-    --no-grid 仅跳过渲染，JSON 的 g_grid 恒在（保证报告数字可脚本复算）。
+核心口径（v3 Look-Through Return Method，与预期差/Capex拐点模块解耦）：
+    1. 维持性现金底座 OE_cash：
+       非金融以 OCF_扣息 - D&A×γ_maint 为校验底座（剥离扩张性 Capex 错杀）；
+       商业银行以监管可分配利润底座 min(NP, AA_2y) 校验；非银金融采用五年均值平滑抑制周期顶点虚高。
+    2. 广义穿透回报率 R_LT = R_dist（现金分红 + 注销式回购） + R_retain（经现金含金量与 ROIC>R_req 双重校验的留存复利 × η）。
+    3. 铁血防守纪律：现金含金量校验不通过或 ROIC_eff < R_req + 2% 时，η 强制归零并降级现金口径。
 
-输入 JSON 字段（金额单位：百万元；比率用小数；每股用元）：
-    company / code / date / price / market_cap / shares
-    net_profit_C / depreciation_D / capex_ratio_G / profit_discount_k（利润折扣系数，默认0.8，0.7~0.9 按可预测性取档）
-    payout_M（支付率保守锚：承诺/公告最低值优先；无承诺取近3年最低档 M_min，均值仅交叉参考）
-    net_profit_C_fwd（可选，前瞻盈利，百万元；提供时启用成长校准轨）
-    payout_M_fwd（可选，前瞻支付率锚，默认=M） / profit_discount_k_fwd（可选，前瞻折扣，默认=min(k,0.85)）
-    aa_fwd（可选，前瞻真实可支配现金，百万元；现金校验） / c_fwd_source（可选，前瞻盈利来源标注）
-    c_fwd_verified（可选，bool；是否已由实际数据验证——升级条款触发标记）
-    aa_2y（真实可支配现金，默认口径） / aa_all（可选，5年均值对比）
-    rf / cycle_adjust_pct（弱周期=0）
-    lambda（经营杠杆，可省略：提供 surplus_series+revenue_series 时自动计算）
-    lambda_policy=historical_mean_reference：保留历史逐段斜率均值及低可靠性诊断，不以0替代不稳定估计
-    base_revenue / surplus_series（由新到旧，可选）/ revenue_series（可选）
-    cash_balance（货币资金，未扣债）/ net_debt（有息负债−货币资金，校验字段）/ interest_bearing_debt / ebitda（可选）/ fcf（可选）
-    goodwill / total_assets（可选）/ dps / working_capital / book_equity（普通股权益，可选）
-    cash_protection / low_10y_close：正值且对应 *_verified=true、*_source非空才启用价格锚
+输出兼容契约：
+    - 始终在 `formal_metrics` 与 `look_through_v3` 输出完整 v3 正式术语结果；
+    - 当 `model_mode == "v3_look_through"` 或传入 `v3=True` / `--v3` 时，顶层主字段（R_star, GG, r_eff, II, KK, target_buy, floor_price）切换为 v3 口径；
+    - 未启用 v3 模式时保持顶层 legacy 字段与历史单元测试 100% 兼容。
 
-公式与阈值见 ../references/methodology.md；数字示例见该文件 §12。
+公式与阈值见 ../references/methodology.md。
 '''
 
 from __future__ import annotations
@@ -43,6 +30,72 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
+_ARCHETYPE_LABELS = {
+    'bank': '商业银行',
+    'non_bank_fin': '非银金融',
+    'internet_tech': '互联网与轻资产科技',
+    'consumer': '消费品与零售',
+    'utility_infra': '公用事业与基础设施',
+    'manufacturing': '制造业与工业',
+}
+
+_MAINT_GAMMA_CAP = {
+    'bank': 0.0,
+    'non_bank_fin': 0.0,
+    'internet_tech': 0.80,
+    'consumer': 0.80,
+    'manufacturing': 0.90,
+    'utility_infra': 0.90,
+}
+
+_ETA_MAX_CAP = {
+    'internet_tech': 0.80,
+    'consumer': 0.80,
+    'manufacturing': 0.80,
+    'bank': 0.25,
+    'non_bank_fin': 0.25,
+    'utility_infra': 0.55,
+}
+
+_ETA_SPREAD_SCALE = {
+    'internet_tech': 0.15,
+    'consumer': 0.15,
+    'manufacturing': 0.15,
+    'bank': 0.05,
+    'non_bank_fin': 0.05,
+    'utility_infra': 0.12,
+}
+
+# 金融板块高杠杆权益资本成本门槛 K_{e,fin}（低于此门槛的留存利润仅补充监管资本，不计超额复利溢价）
+_FIN_KE_HURDLE = {
+    'bank': 0.090,
+    'non_bank_fin': 0.095,
+}
+
+
+def infer_industry_archetype(cfg: dict) -> str:
+    """根据显式声明或名称/财务特征识别六大行业原型。"""
+    explicit = str(cfg.get('industry_archetype') or '').strip()
+    if explicit in _ARCHETYPE_LABELS:
+        return explicit
+    company = str(cfg.get('company') or '')
+    notes = ' '.join(str(x) for x in cfg.get('input_warnings', []))
+    combined = f'{company} {notes}'
+    d_val = cfg.get('depreciation_D')
+    if any(k in combined for k in ('银行', '农商行', '银行业')):
+        return 'bank'
+    if any(k in combined for k in ('保险', '人保', '太保', '新华', '平安', '证券', '海通', '券商', '非银', '信托')):
+        return 'non_bank_fin'
+    if d_val is not None and float(d_val) == 0.0:
+        return 'non_bank_fin'
+    if any(k in combined for k in ('电力', '水务', '环境', '高速', '铁路', '公路', '港口', '燃气', '能源', '核电', '矿业', '海油', '神华', '移动', '电信', '成渝', '轮船', '海控')):
+        return 'utility_infra'
+    if any(k in combined for k in ('腾讯', '阿里', '美团', '百度', '网易', '完美', '游戏', '互联网', '软件', '传媒', '网宿', '光环')):
+        return 'internet_tech'
+    if any(k in combined for k in ('茅台', '五粮液', '伊利', '啤酒', '乳业', '食品', '饮料', '阿胶', '白药', '达仁堂', '家纺', '百货', '旅游', '免税', '消费', '泵业')):
+        return 'consumer' if not any(k in combined for k in ('泵业', '化工', '机械', '汽车', '轮胎', '电气', '光电')) else 'manufacturing'
+    return 'manufacturing'
 
 
 def pct(x: float) -> str:
@@ -93,7 +146,245 @@ def diagnose_lambda(cfg: dict) -> dict:
             'reasons': list(dict.fromkeys(reasons))}
 
 
-def compute(cfg: dict) -> dict:
+def _finite_num(val) -> float | None:
+    if isinstance(val, bool) or val is None:
+        return None
+    try:
+        f = float(val)
+        return f if math.isfinite(f) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_look_through_v3(
+    cfg: dict,
+    *,
+    C: float,
+    D: float,
+    G_total: float,
+    M: float,
+    aa: float,
+    market_cap: float,
+    price: float,
+    alpha: float,
+    net_debt: float | None,
+    rf: float,
+    cycle_adj: float,
+    II: float,
+    warnings: list[str],
+) -> dict:
+    """穿透回报率法 v3 内核（维持性现金底座 OE_cash + 留存复利转化 η + 行业适配）。"""
+    archetype = infer_industry_archetype(cfg)
+    archetype_cn = _ARCHETYPE_LABELS.get(archetype, archetype)
+    is_fin = archetype in ('bank', 'non_bank_fin')
+    aa_all = _finite_num(cfg.get('aa_all'))
+    fe_int = _finite_num(cfg.get('fe_interest_expense')) or 0.0
+
+    # 1) 维持性资本开支系数 γ_maint 与维持性资本开支 Capex_maint
+    explicit_gamma = _finite_num(cfg.get('gamma_maint') if cfg.get('gamma_maint') is not None else cfg.get('maint_capex_factor'))
+    gamma_cap = _MAINT_GAMMA_CAP[archetype]
+    if is_fin or D <= 0:
+        gamma_maint = 0.0
+    elif explicit_gamma is not None and explicit_gamma >= 0:
+        gamma_maint = explicit_gamma
+    elif G_total > 0:
+        gamma_maint = min(G_total, gamma_cap)
+    else:
+        gamma_maint = 0.0
+    capex_maint = D * gamma_maint
+
+    # 2) 常态化盈利基数 NP_base（非银金融按近5年均值防周期顶点高估）
+    np_base = C
+    np_normalized_note = '当期归母净利润 NP'
+    if archetype == 'non_bank_fin' and aa_all is not None and aa_all > 0 and C > 1.25 * aa_all:
+        np_base = 1.25 * aa_all
+        np_normalized_note = f'非银周期平滑基数 min(NP, 1.25×5Y均值)={np_base:.2f}（抑制周期高点虚高）'
+    oe_v3 = np_base + D - capex_maint
+
+    # 3) 维持性现金底座 OE_cash（剥离扩张性 Capex 错杀；金融按监管可分配利润稳态底座）
+    explicit_ocf_after_int = _finite_num(cfg.get('ocf_after_interest'))
+    explicit_ocf = _finite_num(cfg.get('ocf_latest') if cfg.get('ocf_latest') is not None else cfg.get('ocf'))
+    if is_fin:
+        if archetype == 'bank':
+            oe_cash = min(np_base, aa) if aa is not None else np_base
+            oe_cash_basis = '商业银行监管稳态可分配盈余 min(NP, 2Y均值)'
+        else:
+            anchor_aa = max(aa, aa_all) if aa_all is not None else aa
+            oe_cash = min(np_base, anchor_aa) if anchor_aa is not None else np_base
+            oe_cash_basis = '非银金融周期平滑稳态盈余 min(NP_norm, 稳态均值)'
+        ocf_after_int = None
+    else:
+        if explicit_ocf_after_int is not None:
+            ocf_after_int = explicit_ocf_after_int
+            oe_cash_basis = '实测扣息经营现金流 ocf_after_interest − 维持性 Capex'
+        elif explicit_ocf is not None:
+            ocf_after_int = explicit_ocf - fe_int
+            oe_cash_basis = '实测经营现金流 OCF_latest − 费用化利息 − 维持性 Capex'
+        else:
+            # 由 aa_2y = mean(OCF - D * G_total) 无偏还原近2年均 OCF
+            ocf_after_int = aa + D * G_total - fe_int
+            oe_cash_basis = '由历史结余还原2Y均OCF − 维持性 Capex（剥离扩张性 Capex）'
+        oe_cash = ocf_after_int - capex_maint
+
+    # 4) 广义股东分配率 p_dist（现金分红率 p_div + 注销式回购率 p_buyback）
+    p_div = max(0.0, float(M))
+    explicit_pb = _finite_num(cfg.get('buyback_payout_ratio'))
+    buyback_amt = _finite_num(cfg.get('buyback_amount')) or 0.0
+    if explicit_pb is not None and explicit_pb >= 0:
+        p_buyback = explicit_pb
+    elif buyback_amt > 0 and C > 0:
+        p_buyback = buyback_amt / C
+    else:
+        p_buyback = 0.0
+    p_dist_raw = p_div + p_buyback
+    p_dist = min(p_dist_raw, 1.25)  # 允许少量超额回馈上限至 125%，并由现金校验兜底
+    retained_share = max(0.0, 1.0 - p_dist)
+
+    # 5) 现金含金量校验（以维持性现金底座检验利润是否真实落袋）
+    denom_prof = np_base * alpha
+    cash_coverage = (oe_cash / denom_prof) if denom_prof > 0 else (1.0 if oe_cash >= 0 else 0.0)
+    r_dist = (np_base * alpha * p_dist / market_cap) if np_base > 0 else 0.0
+    r_cash_dist = (oe_cash * p_dist / market_cap) if oe_cash > 0 else 0.0
+    dist_cash_dev = r_dist - r_cash_dist
+    cash_quality_passed = (denom_prof > 0) and (cash_coverage >= 0.85) and (dist_cash_dev < 0.02)
+
+    # 6) 有效投入资本回报率 ROIC_eff 与留存转化率 η
+    roic_explicit = _finite_num(cfg.get('roic'))
+    roe_explicit = _finite_num(cfg.get('roe') if cfg.get('roe') is not None else cfg.get('roe_latest'))
+    book_eq = _finite_num(cfg.get('book_equity'))
+    roic_basis = ''
+    roic_eff: float | None = None
+    if is_fin:
+        if roe_explicit is not None:
+            roic_eff = roe_explicit
+            roic_basis = '显式净资产收益率 ROE'
+        elif book_eq is not None and book_eq > 0 and np_base > 0:
+            roic_eff = np_base / book_eq
+            roic_basis = 'NP_base / 归母普通股权益 BookEquity（金融 ROE 口径）'
+    else:
+        if roic_explicit is not None:
+            roic_eff = roic_explicit
+            roic_basis = '显式投入资本回报率 ROIC'
+        elif book_eq is not None and book_eq > 0 and np_base > 0:
+            nd_val = net_debt if net_debt is not None else 0.0
+            invested_cap = max(book_eq * 0.25, book_eq + nd_val)
+            roic_eff = np_base / invested_cap
+            roic_basis = 'NP_base / 经营投入资本 max(0.25×净资产, 净资产+净负债)'
+        elif roe_explicit is not None:
+            roic_eff = roe_explicit
+            roic_basis = '显式 ROE 代理（缺净债务明细）'
+
+    eta = 0.0
+    eta_reason = ''
+    eta_max = _ETA_MAX_CAP[archetype]
+    spread_scale = _ETA_SPREAD_SCALE[archetype]
+    fin_ke = max(_FIN_KE_HURDLE[archetype], II + 0.02) if is_fin else None
+    if not cash_quality_passed:
+        eta = 0.0
+        eta_reason = f'现金含金量校验未通过（Cov_cash={cash_coverage:.2f}<0.85 或现金偏差≥2%），留存转化率 η 强制归零'
+    elif retained_share <= 0:
+        eta = 0.0
+        eta_reason = '分配率 ≥ 100%，无留存再投资比例（1 - p_dist = 0）'
+    elif roic_eff is None:
+        eta = 0.0
+        eta_reason = '缺失净资产或 ROIC 口径，保守将 η 置零'
+    elif is_fin and fin_ke is not None:
+        if roic_eff <= fin_ke:
+            eta = 0.0
+            eta_reason = (
+                f'金融 ROE={roic_eff*100:.2f}% 未超越金融权益资本成本门槛 Ke={fin_ke*100:.2f}%，'
+                f'留存仅补充监管资本，η 置零'
+            )
+        else:
+            raw_eta = eta_max * (roic_eff - fin_ke) / spread_scale
+            eta = round(min(eta_max, max(0.0, raw_eta)), 4)
+            eta_reason = (
+                f'现金含金量合格且金融 ROE={roic_eff*100:.2f}% 超权益资本成本 Ke={fin_ke*100:.2f}% '
+                f'+{(roic_eff-fin_ke)*100:.2f}pct → η={eta:.4f}（{archetype_cn}上限 {eta_max:.2f}）'
+            )
+    elif roic_eff < II + 0.02:
+        eta = 0.0
+        eta_reason = f'ROIC_eff={roic_eff*100:.2f}% 低于要求门槛+2pct（{(II+0.02)*100:.2f}%），未创造显著超额价值，η 置零'
+    else:
+        raw_eta = eta_max * (roic_eff - II) / spread_scale
+        eta = round(min(eta_max, max(0.0, raw_eta)), 4)
+        eta_reason = (
+            f'现金含金量合格且 ROIC_eff={roic_eff*100:.2f}% 超门槛 II={II*100:.2f}% '
+            f'+{(roic_eff-II)*100:.2f}pct → η={eta:.4f}（{archetype_cn}上限 {eta_max:.2f}）'
+        )
+
+    # 7) 广义穿透回报率 R_LT、维持性现金校验 R_cash 与有效口径 R_eff
+    # 金融股在 PB < 1 时按账面净资产增厚（分母取 max(市值, 净资产) 避免 1/PB 虚增留存复利）
+    retain_denom = max(market_cap, book_eq) if (is_fin and book_eq is not None and book_eq > 0) else market_cap
+    pb_discount_applied = bool(is_fin and book_eq is not None and book_eq > market_cap)
+    r_retain = (np_base * alpha * retained_share * eta / retain_denom) if np_base > 0 else 0.0
+    r_lt = r_dist + r_retain
+    r_cash_retain = (oe_cash * retained_share * eta / retain_denom) if oe_cash > 0 else 0.0
+    r_cash_full = (r_cash_dist + r_cash_retain) if oe_cash > 0 else (oe_cash * p_dist / market_cap)
+    cash_dev_v3 = r_lt - r_cash_full
+
+    if cash_quality_passed and cash_dev_v3 < 0.02:
+        primary_v3 = 'R_LT（广义穿透主口径）' if r_retain > 0 else 'R_dist（直接分配主口径）'
+        r_eff_v3 = r_lt
+    elif cash_quality_passed and r_cash_dist >= II:
+        # 即使现金校验低于 R_LT 超 2pct，至少不虚高，取两者较小值
+        primary_v3 = 'R_cash（维持性现金上限校准）'
+        r_eff_v3 = min(r_lt, max(r_cash_full, r_cash_dist))
+    else:
+        primary_v3 = 'R_cash（现金含金量不足降级）'
+        r_eff_v3 = r_cash_dist if oe_cash > 0 else 0.0
+
+    jj_v3 = r_eff_v3 - II
+    mos_v3 = jj_v3 + cycle_adj
+    p_buy_v3 = price * r_eff_v3 / II if II > 0 else 0.0
+    p_floor_v3 = (price * II / r_eff_v3) if (r_eff_v3 or 0) > 0 else None
+
+    return {
+        'model_version': 'look_through_v3',
+        'industry_archetype': archetype,
+        'industry_archetype_label': archetype_cn,
+        'np_base': np_base,
+        'np_normalized_note': np_normalized_note,
+        'total_capex_factor_G': G_total,
+        'maint_capex_factor_gamma': gamma_maint,
+        'maint_capex_amount': capex_maint,
+        'owner_earnings_OE': oe_v3,
+        'ocf_after_interest': ocf_after_int,
+        'maint_cash_owner_earnings': oe_cash,
+        'oe_cash_basis': oe_cash_basis,
+        'cash_coverage': cash_coverage,
+        'cash_quality_passed': cash_quality_passed,
+        'p_div': p_div,
+        'p_buyback': p_buyback,
+        'buyback_amount': buyback_amt,
+        'total_distribution_ratio_p': p_dist,
+        'retained_share': retained_share,
+        'alpha': alpha,
+        'roic_eff': roic_eff,
+        'roic_basis': roic_basis,
+        'fin_ke_hurdle': fin_ke,
+        'retain_denominator': retain_denom,
+        'pb_discount_applied': pb_discount_applied,
+        'eta': eta,
+        'eta_reason': eta_reason,
+        'r_dist': r_dist,
+        'r_retain': r_retain,
+        'r_lt': r_lt,
+        'r_cash_dist': r_cash_dist,
+        'r_cash': r_cash_full,
+        'cash_dev': cash_dev_v3,
+        'primary': primary_v3,
+        'r_eff': r_eff_v3,
+        'required_return_II': II,
+        'jj': jj_v3,
+        'margin_of_safety_KK': mos_v3,
+        'target_buy': p_buy_v3,
+        'floor_price': p_floor_v3,
+        'qualified': bool(r_eff_v3 > II),
+    }
+
+
+def compute(cfg: dict, *, v3: bool | None = None) -> dict:
     warnings = list(cfg.get('input_warnings', []))
     cash = cfg.get('cash_balance')
     legacy_cash = cfg.get('net_cash')
@@ -129,54 +420,85 @@ def compute(cfg: dict) -> dict:
             raise ValueError(f'{field} 是必需有限数字，缺失不可填0')
     if min(price, market_cap, shares)<=0:
         raise ValueError('price/market_cap/shares 必须为正数')
-    # --- 穿透回报率 ---
+    # --- 经典滞后分红口径（legacy_v2，用于兼容旧输入回归对比） ---
     H = D * G
     oe = C + D - H
-    k = cfg.get('profit_discount_k', 0.8)   # 利润折扣系数（默认0.8，0.7~0.9，按可预测性取档，保守方向取小值）
-    R_star = C * k * M / market_cap         # 主穿透回报率（打折净利润 × 最低支付率）——主估值输入
-    R = C * M / market_cap                  # 账面口径（交叉校验）
-    GG = aa * M / market_cap                # 现金结余口径（校验：验证 R* 有真钱支撑）
-    HH = R - GG                             # 账面-现金偏差（|HH|≥2pct → 专项调查）
-    cash_dev = R_star - GG                  # 现金校验偏差：≥2pct → 现金验证失败，有效口径降级为 GG
+    k = cfg.get('profit_discount_k', 0.8)   # 盈利确定性折算系数 α（默认0.8，0.7~0.9）
+    R_star = C * k * M / market_cap         # 纯分红穿透回报率（旧口径）
+    R = C * M / market_cap                  # 账面未折算分红率
+    GG = aa * M / market_cap                # 历史全资本开支口径现金校验
+    HH = R - GG                             # 账面-现金偏差
+    cash_dev = R_star - GG                  # 现金校验偏差：≥2pct → 现金验证失败，降级为 GG
     if cash_dev >= 0.02:
         primary = 'GG（现金校验降级）'
         r_eff = GG
     else:
         primary = 'R*'
         r_eff = R_star
-    ii_floor = cfg.get('ii_floor', 0.035)  # 市场门槛下限：A股0.035 / 港股0.05 / 美股0.04（methodology §1）
+    ii_floor = cfg.get('ii_floor', 0.035)  # 市场门槛下限：A股0.035 / 港股0.05 / 美股0.04
     rf_margin = cfg.get('rf_margin', 0.02)  # Rf 加成：A股+2pct / 港股+3pct / 美股+2pct
     II = max(ii_floor, rf + rf_margin)
     JJ = r_eff - II
     KK = JJ + cycle_adj  # 弱周期 cycle_adj=0
-    target_buy = price * r_eff / II  # 目标买入价（主口径）：r_eff=II 时的股价（最高可买价/卖出触发参考）
-    floor_price = (price * II / r_eff) if (r_eff or 0) > 0 else None  # 门槛价格（下行保护参考）：r_eff<=0（如零派息）时无定义置 None
+    target_buy = price * r_eff / II  # 目标买入价（旧口径）
+    floor_price = (price * II / r_eff) if (r_eff or 0) > 0 else None
 
-    # --- 龟龟轨 · 成长校准（forward，2026-08-21 新增）---
+    # --- 穿透回报率法 v3（维持性现金底座 OE_cash + 留存复利转化 η） ---
+    lt_v3 = _compute_look_through_v3(
+        cfg,
+        C=C, D=D, G_total=G, M=M, aa=aa, market_cap=market_cap, price=price,
+        alpha=k, net_debt=net_debt, rf=rf, cycle_adj=cycle_adj, II=II, warnings=warnings,
+    )
+    use_v3 = (v3 is True) or (v3 is None and cfg.get('model_mode') == 'v3_look_through')
+    legacy_snapshot = {
+        'R_star': R_star, 'R': R, 'GG': GG, 'HH': HH, 'cash_dev': cash_dev,
+        'primary': primary, 'r_eff': r_eff, 'II': II, 'JJ': JJ, 'KK': KK,
+        'target_buy': target_buy, 'floor_price': floor_price,
+        'H': H, 'OE': oe, 'G': G,
+    }
+
+    # --- 前瞻盈利校准轨（forward） ---
     # 触发：net_profit_C_fwd 有证据支撑（公司指引/券商一致预期下沿/自建驱动桥）且 > trailing C；
-    # 纪律：评级锚仍为保守轨 trailing；本轨只输出"成长验证买入区"与升级触发参考（methodology §2.1）。
+    # 纪律：主评级仍锚定已实现基线；前瞻轨仅输出“成长验证买入区”与升级触发参考（methodology §2.1）。
     C_fwd = cfg.get('net_profit_C_fwd')
     if C_fwd is not None:
         k_fwd = cfg.get('profit_discount_k_fwd', min(k, 0.85))
         M_fwd = cfg.get('payout_M_fwd', M)
-        R_star_fwd = C_fwd * k_fwd * M_fwd / market_cap
+        p_dist_fwd = M_fwd + lt_v3['p_buyback']
+        retain_fwd = max(0.0, 1.0 - p_dist_fwd)
+        eta_fwd = lt_v3['eta'] if (use_v3 and lt_v3['cash_quality_passed']) else 0.0
+        retain_denom_fwd = lt_v3.get('retain_denominator', market_cap) if use_v3 else market_cap
+        if use_v3:
+            R_star_fwd = (
+                C_fwd * k_fwd * p_dist_fwd / market_cap
+                + C_fwd * k_fwd * retain_fwd * eta_fwd / retain_denom_fwd
+            )
+        else:
+            R_star_fwd = C_fwd * k_fwd * M_fwd / market_cap
         gg_fwd = None
         aa_fwd = cfg.get('aa_fwd')
         if aa_fwd is not None:
-            gg_fwd = aa_fwd * M_fwd / market_cap
+            if use_v3:
+                gg_fwd = (
+                    aa_fwd * p_dist_fwd / market_cap
+                    + aa_fwd * retain_fwd * eta_fwd / retain_denom_fwd
+                )
+            else:
+                gg_fwd = aa_fwd * M_fwd / market_cap
         cash_dev_fwd = (R_star_fwd - gg_fwd) if gg_fwd is not None else None
         if cash_dev_fwd is not None and cash_dev_fwd >= 0.02:
             r_eff_fwd = gg_fwd
-            primary_fwd = 'GG_fwd（现金校验降级）'
+            primary_fwd = 'R_cash_fwd（现金校验降级）' if use_v3 else 'GG_fwd（现金校验降级）'
         else:
             r_eff_fwd = R_star_fwd
-            primary_fwd = 'R*_fwd'
+            primary_fwd = 'R_LT_fwd' if use_v3 else 'R*_fwd'
         KK_fwd = r_eff_fwd - II
         target_buy_fwd = price * r_eff_fwd / II
         floor_price_fwd = (price * II / r_eff_fwd) if (r_eff_fwd or 0) > 0 else None
         growth_calib = {
             'enabled': True,
             'C_fwd': C_fwd, 'k_fwd': k_fwd, 'M_fwd': M_fwd,
+            'p_dist_fwd': p_dist_fwd, 'eta_fwd': eta_fwd,
             'R_star_fwd': R_star_fwd, 'GG_fwd': gg_fwd, 'cash_dev_fwd': cash_dev_fwd,
             'primary_fwd': primary_fwd, 'r_eff_fwd': r_eff_fwd,
             'KK_fwd': KK_fwd, 'target_buy_fwd': target_buy_fwd, 'floor_price_fwd': floor_price_fwd,
@@ -329,13 +651,70 @@ def compute(cfg: dict) -> dict:
                 trap_cash = True
                 break
 
+    formal_metrics = {
+        'model_mode': 'v3_look_through' if use_v3 else 'legacy_v2_compatible',
+        'industry_archetype': lt_v3['industry_archetype'],
+        'industry_archetype_label': lt_v3['industry_archetype_label'],
+        'net_profit_NP': lt_v3['np_base'],
+        'depreciation_DA': D,
+        'total_capex_intensity': G,
+        'maint_capex_factor_gamma': lt_v3['maint_capex_factor_gamma'],
+        'maint_capex_amount': lt_v3['maint_capex_amount'],
+        'owner_earnings_OE': lt_v3['owner_earnings_OE'],
+        'maint_cash_owner_earnings': lt_v3['maint_cash_owner_earnings'],
+        'free_cash_surplus': aa,
+        'total_distribution_ratio_p': lt_v3['total_distribution_ratio_p'],
+        'dividend_payout_ratio_p_div': lt_v3['p_div'],
+        'buyback_payout_ratio_p_buyback': lt_v3['p_buyback'],
+        'profit_reliability_alpha': k,
+        'effective_capital_return': lt_v3['roic_eff'],
+        'reinvestment_efficiency_eta': lt_v3['eta'],
+        'direct_distribution_return': lt_v3['r_dist'],
+        'retained_compounding_return': lt_v3['r_retain'],
+        'look_through_return_R_LT': lt_v3['r_lt'],
+        'maint_cash_return_R_cash': lt_v3['r_cash'],
+        'effective_look_through_return': lt_v3['r_eff'],
+        'required_return_threshold': II,
+        'margin_of_safety_MoS': lt_v3['margin_of_safety_KK'],
+        'target_buy_price': lt_v3['target_buy'],
+        'downside_floor_price': lt_v3['floor_price'],
+        'cash_quality_passed': lt_v3['cash_quality_passed'],
+        'cash_coverage': lt_v3['cash_coverage'],
+    }
+
+    if use_v3:
+        H_out = lt_v3['maint_capex_amount']
+        oe_out = lt_v3['owner_earnings_OE']
+        R_star_out = lt_v3['r_lt']
+        GG_out = lt_v3['r_cash']
+        cash_dev_out = lt_v3['cash_dev']
+        primary_out = lt_v3['primary']
+        r_eff_out = lt_v3['r_eff']
+        JJ_out = lt_v3['jj']
+        KK_out = lt_v3['margin_of_safety_KK']
+        target_buy_out = lt_v3['target_buy']
+        floor_price_out = lt_v3['floor_price']
+    else:
+        H_out = H
+        oe_out = oe
+        R_star_out = R_star
+        GG_out = GG
+        cash_dev_out = cash_dev
+        primary_out = primary
+        r_eff_out = r_eff
+        JJ_out = JJ
+        KK_out = KK
+        target_buy_out = target_buy
+        floor_price_out = floor_price
+
     out = {
         'meta': {k: cfg.get(k) for k in ('company', 'code', 'date')},
-        'H': H, 'OE': oe,
-        'k': k, 'R_star': R_star, 'R': R, 'GG': GG, 'HH': HH, 'cash_dev': cash_dev,
-        'primary': primary, 'r_eff': r_eff,
-        'II': II, 'JJ': JJ, 'KK': KK,
-        'target_buy': target_buy, 'floor_price': floor_price,
+        'model_mode': 'v3_look_through' if use_v3 else 'legacy_v2',
+        'H': H_out, 'OE': oe_out,
+        'k': k, 'R_star': R_star_out, 'R': R, 'GG': GG_out, 'HH': HH, 'cash_dev': cash_dev_out,
+        'primary': primary_out, 'r_eff': r_eff_out,
+        'II': II, 'JJ': JJ_out, 'KK': KK_out,
+        'target_buy': target_buy_out, 'floor_price': floor_price_out,
         'lambda': lam, 'lambda_warning': lam_warn,
         'lambda_policy': lambda_policy, 'lambda_reliable': lambda_reliable,
         'lambda_diagnostics': lambda_diagnostics,
@@ -354,6 +733,9 @@ def compute(cfg: dict) -> dict:
         'trap_cash_triggered': trap_cash,
         'g_grid': g_grid,
         'growth_calib': growth_calib,
+        'look_through_v3': lt_v3,
+        'formal_metrics': formal_metrics,
+        'legacy_v2': legacy_snapshot,
     }
     return out
 
@@ -362,43 +744,68 @@ def render(o: dict, show_grid: bool = True) -> str:
     from chart_numbers import format_amount
     amount = lambda scaled: format_amount(scaled * 1e6)
     m = o['meta']
+    fm = o.get('formal_metrics') or {}
+    lt = o.get('look_through_v3') or {}
     L = []
-    L.append('=' * 62)
-    L.append(' 龟龟投资策略 v2 · 穿透回报率估值 ｜ {} {} {}'.format(
+    L.append('=' * 66)
+    L.append(' 穿透回报率法（Look-Through Return Method v3）估值报告 ｜ {} {} {}'.format(
         m.get('company', ''), m.get('code', ''), m.get('date', '')))
-    L.append('=' * 62)
-    L.append(' Owner Earnings = C + D − H = {}  (H={})'.format(amount(o['OE']), amount(o['H'])))
-    L.append(' 主穿透回报率 R* = {}   （C×k×M/市值，k={}，主估值输入）'.format(pct(o['R_star']), o['k']))
-    L.append(' 现金校验 GG = {}   （AA×M/市值，校验口径）'.format(pct(o['GG'])))
-    L.append(' 现金校验偏差 Δc = {}   （≥2pct → 降级为 GG；当前有效口径：{}）'.format(pct2(o['cash_dev']), o['primary']))
-    L.append(' 账面口径 R = {}   （C×M/市值，交叉校验）'.format(pct(o['R'])))
-    L.append(' 账面-现金偏差 HH = {}   （|HH|≥2pct 需专项调查）'.format(pct2(o['HH'])))
-    L.append(' 门槛 II = {}   （按输入的市场下限与Rf加成配置）'.format(pct(o['II'])))
-    L.append(' 安全边际 KK = {}   （JJ={}，基于主口径，含周期修正）'.format(pct2(o['KK']), pct2(o['JJ'])))
-    L.append(' 目标买入价 = {} 元   ｜ 门槛价格 = {} 元   （口径：{}）'.format(fmt2(o['target_buy']), fmt2(o['floor_price']), o['primary']))
+    L.append('=' * 66)
+    if fm:
+        L.append(' 行业原型：{} ({}) ｜ 模型口径：{}'.format(
+            fm.get('industry_archetype_label', '—'), fm.get('industry_archetype', '—'), o.get('model_mode', 'legacy_v2')))
+        L.append(' 账面股东盈余 OE = NP + D&A − Capex_maint = {}  (Capex_maint={}，γ_maint={:.2f})'.format(
+            amount(fm['owner_earnings_OE']), amount(fm['maint_capex_amount']), fm['maint_capex_factor_gamma']))
+        L.append(' 维持性现金底座 OE_cash = {}  ｜ 现金覆盖率 Cov_cash = {:.2f}x ({})'.format(
+            amount(lt['maint_cash_owner_earnings']), lt['cash_coverage'],
+            '含金量合格' if lt['cash_quality_passed'] else '现金含金量不足'))
+        roic_txt = pct(lt['roic_eff']) if lt.get('roic_eff') is not None else '未知'
+        L.append(' 广义分配率 p_dist = {} (分红{} + 回购{}) ｜ ROIC_eff = {} ｜ 留存转化率 η = {:.2f}'.format(
+            pct(lt['total_distribution_ratio_p']), pct(lt['p_div']), pct(lt['p_buyback']), roic_txt, lt['eta']))
+        L.append(' 穿透拆分：直接分配 R_dist = {} + 留存复利 R_retain = {} → 广义穿透 R_LT = {}'.format(
+            pct(lt['r_dist']), pct(lt['r_retain']), pct(lt['r_lt'])))
+        L.append(' 现金穿透校验 R_cash = {} ｜ 有效穿透回报率 R_eff(v3) = {}  ({})'.format(
+            pct(lt['r_cash']), pct(lt['r_eff']), lt['primary']))
+        L.append(' v3 参考锚：安全边际 MoS = {} ｜ 穿透目标买入价 = {} 元 ｜ 下行保护价 = {} 元'.format(
+            pct2(lt['margin_of_safety_KK']), fmt2(lt['target_buy']), fmt2(lt['floor_price'])))
+        L.append('── 现行有效主输出（{}）──'.format(o.get('model_mode', 'v3_look_through')))
+        if o.get('model_mode') != 'v3_look_through':
+            L.append(' 历史全口径 OE = NP + D&A − H_total = {}  (H_total={})'.format(
+                amount(o['OE']), amount(o['H'])))
+    else:
+        L.append(' 账面股东盈余 OE = NP + D&A − Capex_maint = {}  (Capex_maint={})'.format(
+            amount(o['OE']), amount(o['H'])))
+    L.append(' 主穿透回报率 R_LT/R* = {}   （确定性系数 α={}）'.format(pct(o['R_star']), o['k']))
+    L.append(' 现金校验 R_cash/GG = {}   （现金偏差 Δc = {}；有效口径：{}）'.format(
+        pct(o['GG']), pct2(o['cash_dev']), o['primary']))
+    L.append(' 账面未折算分红口径 R = {}   （账面-现金偏差 = {}）'.format(pct(o['R']), pct2(o['HH'])))
+    L.append(' 要求回报门槛 R_req(II) = {}   （按市场下限与无风险利率加成配置）'.format(pct(o['II'])))
+    L.append(' 穿透安全边际 MoS(KK) = {}   （基础利差={}，含周期修正）'.format(pct2(o['KK']), pct2(o['JJ'])))
+    L.append(' 穿透目标买入价 P_buy = {} 元   ｜ 下行保护参考价 P_floor = {} 元   （口径：{}）'.format(
+        fmt2(o['target_buy']), fmt2(o['floor_price']), o['primary']))
     gc = o.get('growth_calib') or {}
     if gc.get('enabled'):
         src = '（' + gc['source'] + '）' if gc.get('source') else ''
         ver = '已由实际数据验证 → 可升级主轨' if gc.get('verified') else '待实际数据验证（升级条款未触发）'
-        L.append('── 龟龟轨 · 成长校准（forward）──')
-        L.append(' C_fwd = {} ｜ k_fwd = {:.2f} ｜ M_fwd = {:.4f}  {}'.format(
+        L.append('── 穿透回报率轨 · 前瞻盈利校准（forward）──')
+        L.append(' NP_fwd = {} ｜ α_fwd = {:.2f} ｜ p_dist_fwd = {:.4f}  {}'.format(
             amount(gc['C_fwd']), gc['k_fwd'], gc['M_fwd'], src))
-        L.append(' 成长校准 R*_fwd = {}  ｜ 现金校验 GG_fwd = {}  ｜ 有效口径：{}'.format(
+        L.append(' 前瞻穿透 R_fwd = {}  ｜ 前瞻现金校验 = {}  ｜ 有效口径：{}'.format(
             pct(gc['r_eff_fwd']), pct(gc['GG_fwd']) if gc['GG_fwd'] is not None else '—', gc['primary_fwd']))
-        L.append(' 成长校准 KK_fwd = {}  ｜ 目标买入价_fwd = {} 元  ｜ 门槛价格_fwd = {} 元'.format(
+        L.append(' 前瞻安全边际 MoS_fwd = {}  ｜ 前瞻目标买入价 = {} 元  ｜ 前瞻保护价 = {} 元'.format(
             pct2(gc['KK_fwd']), fmt2(gc['target_buy_fwd']), fmt2(gc['floor_price_fwd'])))
-        L.append(' 成长验证买入区 = [{:.2f}, {:.2f}] 元（保守轨下限 ~ 成长校准轨上限）｜ 升级：{}'.format(
+        L.append(' 前瞻验证买入区间 = [{:.2f}, {:.2f}] 元（即期基线 ~ 前瞻校准上限）｜ 升级：{}'.format(
             o['target_buy'], gc['target_buy_fwd'], ver))
     L.append(' 经营杠杆 λ = {:.4f}  {}'.format(o['lambda'], o['lambda_warning']))
     if not o.get('lambda_reliable', True):
         L.append(' λ低可靠性：情景是给定系数的条件演算，不代表已识别收入与现金的因果关系。')
     L.append('')
-    L.append('── 单年下滑情景（现金结余口径 GG(k)=AA(k)×M/市值，校验维度）──')
-    L.append('  情景    结余(亿元/万元，逐项标注)   GG(k)    vs门槛    门槛价格')
+    L.append('── 单年收入下滑情景（自由现金结余口径 R_cash(k)，校验维度）──')
+    L.append('  情景    现金结余(亿元/万元，逐项标注)   R_cash(k)   vs门槛    保护价')
     for r in o['single_year']:
         L.append('  {:.1f}×     {}     {}   {}   {}'.format(
             r['k'], amount(r['surplus']), pct(r['gg']), pct2(r['margin']), fmt2(r['floor'])))
-    L.append('── 逐年累积情景（每年-10%）──')
+    L.append('── 逐年累积下滑情景（每年-10%）──')
     for r in o['cumulative']:
         L.append('  {:.3f}×   {}     {}   {}   {}'.format(
             r['k'], amount(r['surplus']), pct(r['gg']), pct2(r['margin']), fmt2(r['floor'])))
@@ -407,13 +814,13 @@ def render(o: dict, show_grid: bool = True) -> str:
         L.append(' 临界收入倍数 k* = {:.2f} {}'.format(o['k_star'], note))
     if show_grid and o.get('g_grid'):
         L.append('')
-        L.append('── G 敏感性网格（维持性Capex系数 G；口径：OE收益率=OE×M/市值，随 G 变；现金 GG=AA×M/市值 见上）──')
-        L.append('   G      H(亿元/万元)    OE(亿元/万元)     OE收益率  目标买入价  门槛价格')
+        L.append('── 维持性资本开支系数网格（γ_maint；口径：OE收益率=OE×p_div/市值，与自由现金结余校验并列）──')
+        L.append('  γ_maint   Capex_maint     OE          OE收益率   目标买入价   保护价')
         for r in o['g_grid']:
-            L.append('  {:.2f}   {}   {}   {}   {:>7}   {:>7}'.format(
+            L.append('   {:.2f}    {}   {}   {}   {:>8}   {:>8}'.format(
                 r['G'], amount(r['H']), amount(r['OE']), pct(r['GG']), fmt2(r['target_buy']), fmt2(r['floor_price'])))
     L.append('')
-    L.append('── 绝对估值 ──')
+    L.append('── 绝对估值与资产锚 ──')
     L.append(' EV = {}'.format(amount(o['EV']) if o['EV'] is not None else '—'))
     if o['ev_ebitda'] is not None:
         L.append(' EV/EBITDA = {:.2f}x'.format(o['ev_ebitda']))
@@ -433,7 +840,7 @@ def render(o: dict, show_grid: bool = True) -> str:
     L.append(' 现金流陷阱触发(结余连续≥2年降>15%): ' + trap_txt)
     for warning in o.get('warnings', []):
         L.append(' ⚠️ ' + warning)
-    L.append('=' * 62)
+    L.append('=' * 66)
     return '\n'.join(L)
 
 
@@ -453,6 +860,7 @@ def selftest() -> None:
         'aa_fwd': 450.0, 'c_fwd_source': '自检：前瞻净利 5.00 亿（示例）',
     }
     o = compute(cfg)
+    o_v3 = compute(cfg, v3=True)
     checks = [
         ('OE', abs(o['OE'] - 458.18) < 0.01),
         ('R_star', abs(o['R_star'] - 0.0528) < 0.0005),
@@ -473,7 +881,7 @@ def selftest() -> None:
         ('premium', abs(o['premium'] - 1.098) < 0.005),
         ('div_yield', abs(o['dividend_yield'] - 0.0616) < 0.0005),
         ('trap', o['trap_cash_triggered'] is False),
-        # 成长校准轨（自检：C_fwd=500, k_fwd=0.8, M_fwd=0.8423）
+        # 前瞻校准轨（自检：C_fwd=500, k_fwd=0.8, M_fwd=0.8423）
         ('gc_enabled', o['growth_calib']['enabled'] is True),
         ('gc_Rstar', abs(o['growth_calib']['R_star_fwd'] - 0.05805) < 0.0005),
         ('gc_GG', abs(o['growth_calib']['GG_fwd'] - 0.06532) < 0.0005),
@@ -486,22 +894,28 @@ def selftest() -> None:
         ('grid_G0.5_GG', abs(o['g_grid'][0]['GG'] - 0.06838) < 0.0005),
         ('grid_G0.9_OE', abs(o['g_grid'][2]['OE'] - 458.18) < 0.01),
         ('grid_G0.9_GG', abs(o['g_grid'][2]['GG'] - 0.06648) < 0.0005),
+        # v3 正式化字段与留存复利核验
+        ('v3_formal_keys', o_v3['formal_metrics']['look_through_return_R_LT'] >= o['R_star']),
+        ('v3_cash_quality', o_v3['look_through_v3']['cash_quality_passed'] is True),
+        ('v3_eta_positive', o_v3['look_through_v3']['eta'] > 0.5),
     ]
-    print(render(o))
+    print(render(o_v3))
     failed = [name for name, ok in checks if not ok]
     if failed:
         print('\n❌ 自检失败项: ' + str(failed))
         sys.exit(1)
-    print('\n✅ 自检通过：输出与凌霄泵业分析报告一致')
+    print('\n✅ 自检通过：legacy 基准与 v3 正式穿透口径均一致')
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description='龟龟投资策略 v2 穿透回报率计算器')
+    ap = argparse.ArgumentParser(description='穿透回报率法（Look-Through Return Method v3）估值计算器')
     ap.add_argument('--config', type=Path, help='输入 JSON 配置')
+    ap.add_argument('--v3', action='store_true', help='强制以 v3 广义穿透回报率作为主输出口径')
+    ap.add_argument('--legacy', action='store_true', help='强制使用旧版纯分红口径作主输出（历史兼容）')
     ap.add_argument('--json', action='store_true', help='纯 JSON 输出到 stdout（人类可读文本 → stderr）')
-    ap.add_argument('--out', type=Path, help='JSON 输出文件路径（推荐，避免 PowerShell `>` 重定向产生 UTF-16 文件；2026-08-23 中远海控批次事故）')
-    ap.add_argument('--no-grid', action='store_true', help='跳过 G 敏感性网格的渲染输出（JSON 的 g_grid 恒在）')
-    ap.add_argument('--selftest', action='store_true', help='用凌霄泵业数据自检')
+    ap.add_argument('--out', type=Path, help='JSON 输出文件路径（推荐，避免 PowerShell `>` 重定向产生 UTF-16 文件）')
+    ap.add_argument('--no-grid', action='store_true', help='跳过维持性资本开支敏感性网格的渲染输出（JSON 的 g_grid 恒在）')
+    ap.add_argument('--selftest', action='store_true', help='用凌霄泵业数据自检（含 v3 校验）')
     args = ap.parse_args()
     if args.selftest:
         selftest()
@@ -509,7 +923,8 @@ def main() -> int:
     if not args.config:
         ap.error('需要 --config 或 --selftest')
     cfg = json.loads(args.config.read_text(encoding='utf-8'))
-    out = compute(cfg)
+    v3_flag = True if args.v3 else (False if args.legacy else None)
+    out = compute(cfg, v3=v3_flag)
     text = render(out, show_grid=not args.no_grid)
     if args.json:
         # 唯一真值：stdout 只出纯 JSON（可 > 穿透回报率_输出.json 供机器解析）；文本走 stderr 不污染 stdout

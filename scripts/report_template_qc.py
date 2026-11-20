@@ -37,13 +37,13 @@ FIXED_FINANCE = [
 ]
 
 CONTENT_RULES = {
-    "1": ("最终结论", "12个月目标价", "龟龟", "最大优势", "最大风险"),
+    "1": ("最终结论", "12个月目标价", ("穿透回报率", "龟龟"), "最大优势", "最大风险"),
     "2": ("宏观", "生命周期", "需求", "供给", "政策"),
     "3": ("商业模式", "分部", "护城河", "管理层", "治理"),
     "4": ("盈利与资产负债表", "现金流与盈利质量", "本期财报体检", "同行业比较"),
     "5": ("假设", "悲观", "基准", "乐观", "概率", "敏感性", "跟踪指标"),
-    "6": ("SOTP", "龟龟穿透回报率", "R_eff", "II", "KK", "目标买入价"),
-    "7": ("市场/券商轨", "龟龟轨", "概率加权", "仓位", "门槛价格"),
+    "6": ("SOTP", ("穿透回报率", "龟龟穿透回报率"), "R_eff", ("II", "R_req"), ("KK", "MoS"), ("目标买入价", "穿透目标买入价")),
+    "7": ("市场/券商轨", ("穿透回报率轨", "龟龟轨"), "概率加权", "仓位", ("门槛价格", "下行保护")),
     "8": ("催化剂", "跟踪验证台账", "验证", "触发"),
     "9": ("风险矩阵", "概率及方法", "尾部", "反证", "待验证"),
     "10": ("数据来源", "方法", "图表清单", "复验", "免责声明"),
@@ -122,8 +122,9 @@ def check_report(text: str) -> tuple[list[str], list[str]]:
             continue
         body = text[match[2]:match[3]]
         for token in CONTENT_RULES[number]:
-            if token not in body:
-                failures.append(f"第 {number} 章缺少必写内容「{token}」")
+            alts = token if isinstance(token, tuple) else (token,)
+            if not any(alt in body for alt in alts):
+                failures.append(f"第 {number} 章缺少必写内容「{alts[0]}」")
         if "**本节结论**：" not in body and "**本节结论**:" not in body:
             failures.append(f"第 {number} 章缺少「本节结论」")
         if "数据依据：" not in body and "数据依据:" not in body:

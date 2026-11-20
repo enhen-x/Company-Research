@@ -15,7 +15,8 @@
 | 研究专题计算 | 指引、经营驱动、预测、反方及估值结果集中于结构化输入与输出，缺口保留 `INCOMPLETE` |
 | 成稿执行记录 | 每轮记录 `run_id`、阶段状态、退出码、耗时和输入/产物哈希；技术结果与研究证据等级分别披露 |
 | 图表修复 | 环形图清理空标签，保持百分比与扇区一致；双轴图合并全部有效系列，保留右轴价格图例 |
-| Capex与分红跃迁引擎 | 新增 `scripts/capex_dividend_engine.py`（图19–图21）：融合未来资本开支规划与前复权股价/除权分红节点、重大在建工程转固时间轴，以及同合并扣息口径 **`扣息FCFE/合并净利润 = (OCF - Capex - 费用化利息) / 合并净利润`** 与 `(1 - Capex/OCF)` 现金留存率走势 |
+| Capex与分红跃迁引擎 *(预期差维度)* | 新增 `scripts/capex_dividend_engine.py`（图19–图21）：聚焦周期拐点预期差，以同合并扣息 **`扣息FCFE/合并净利润 = (OCF - Capex - 费用化利息) / 合并净利润`** 与 `(1 - Capex/OCF)` 评估未来资本开支回落与分红跃迁 |
+| 穿透回报率法 v3（全行业+术语正式化） | 废除“龟龟”称谓与 Excel 列号；以**维持性现金底座 $OE_{\text{cash}}$ + 分红与注销回购 $p_{\text{dist}}$ + 经 ROIC 校验留存复利 $\eta$** 升级 `calc_penetration_return.py`（v3），适配银行/非银/互联网/制造/消费/公用事业 |
 
 版本变更见 [CHANGELOG.md](CHANGELOG.md)，完整执行规则见 [流水线契约](references/flow-contract.md)。
 
@@ -57,7 +58,7 @@ $company-research-v3 调研 新和成（002001）
 | 穿透回报率估值 | `对 新和成 做穿透回报率估值` |
 | 商业质量分析 | `对 新和成 做商业质量分析` |
 | 独立估值 | `对 新和成 做独立估值分析` |
-| 选股 | `用龟龟选股器筛选……` |
+| 选股 | `用穿透回报率选股器筛选……` |
 
 ### 仅运行数据流水线
 
@@ -120,7 +121,20 @@ SZ.002001 新和成/
 
 标准图号固定为图01—图18（适用平台型触发图18；启用 `input/capex_dividend_plan.json` 时额外生成图19—图21 嵌入 §4.2 与 §6.4），适用性、期间、来源与豁免须明示；图表数量随公司和批次而变。首次研究没有事前预测样本时，不凭空生成历史预测胜率。
 
-## 最近更新（2026-11-13：阶段 2 Capex 与分红跃迁引擎正式集成）
+## 最近更新
+
+### 2026-11-20：穿透回报率法（Look-Through Return Method v3）重构、底层术语正式化与多行业全适配
+
+1. **全面正式化方法论与底层术语（废除“龟龟”与 Excel 列号缩写）**：
+   - 将原「龟龟轨 / 龟龟策略」正式定名为 **「穿透回报率法（Look-Through Return Method v3）」** 与 **「穿透回报率轨」**；
+   - 底层计算输出新增 `formal_metrics` 与 `look_through_v3`（标准金融符号：$NP, D\&A, \gamma_{\text{maint}}, OE_{\text{cash}}, p_{\text{dist}}, \alpha, \text{ROIC}_{\text{eff}}, \eta, R_{\text{dist}}, R_{\text{retain}}, R_{\text{LT}}, R_{\text{cash}}, R_{\text{eff}}, R_{\text{req}}, MoS, P_{\text{buy}}, P_{\text{floor}}$），同时兼容既有顶层键名与 `report_template_qc.py` 双术语契约；
+   - 明确将 **Capex 与分红跃迁引擎（阶段 2）** 划归**预期差维度**另行统筹，不混入内生基础穿透模型。
+2. **打破“仅适用成熟零增长纯红利股”的局限**：
+   - **剥离扩张性 Capex 错杀**：现金含金量校验由全口径 $AA_{2y}$ 升级为 **维持性现金股东盈余 $OE_{\text{cash}} = \text{OCF}_{\text{扣息}} - D\&A \times \gamma_{\text{maint}}$**；扩产期企业只要维持性现金充足即不再被误判降级；
+   - **纳入回购与有效留存复利**：$R_{\text{LT}} = R_{\text{dist}}(\text{分红+注销回购}) + R_{\text{retain}}(\text{经现金含金量与 }\text{ROIC}_{\text{eff}} > R_{\text{req}}\text{ 双重校验的留存复利 } \times \eta)$；含金量不合格或低效留存则强制 $\eta = 0$，守住价值陷阱防线；
+   - **六大行业原型全打通**：针对商业银行（监管可分配盈余 + $K_{e,\text{fin}}=9.0\%$ 权益成本门槛与 $\eta_{\max}=0.25$）、非银金融（5 年周期平滑 + $K_{e,\text{fin}}=9.5\%$ 门槛 + 破净 $\max(\text{市值},\text{净资产})$ 折价约束）、互联网科技（回购+高ROIC）、制造业/消费（维持性Capex上限+超额净现金调节）与公用事业分别设定严谨校验规则。
+
+### 2026-11-13：阶段 2 Capex 与分红跃迁引擎（预期差维度）正式集成
 
 1. **打通前瞻 Capex 与分红可行性模块（`scripts/capex_dividend_engine.py`）**：
    - 运行 `python scripts/capex_dividend_engine.py --dir . --init-template` 一键生成 `input/capex_dividend_plan.json` 骨架，结合年报/公告补齐未来 3 年资本开支规划、重大在建项目投产节点及《股东回报规划》保底分红承诺后，随 `gate_all.py` 自动重建并与 `chart_qc.py` 门控打通。
@@ -133,26 +147,47 @@ SZ.002001 新和成/
 
 ## 估值与仓位口径
 
-研究结合行业适用方法、三情景预测、敏感性分析及龟龟现金纪律。DCF、PE/PB、SOTP 等按行业选择；共用经营假设的多种估值不算独立证据。金融及特殊行业按 [方法论](references/methodology.md) 适配。
+研究结合行业适用方法、三情景预测、敏感性分析及穿透回报率现金纪律。DCF、PE/PB、SOTP 等按行业选择；共用经营假设的多种估值不算独立证据；Capex 规划与分红跃迁（图19–图21）作为周期拐点预期差另行并列。金融及特殊行业按 [方法论](references/methodology.md) 适配。
 
-龟龟框架的主要关系为：
+穿透回报率法（Look-Through Return Method v3）的主要关系为：
 
 | 指标 | 口径 |
 | --- | --- |
-| R* | 归母净利 C × 利润折扣 k × 支付率 M ÷ 市值 |
-| GG | 真实可支配现金 AA × 支付率 M ÷ 市值，作为现金校验 |
-| R_eff | 默认 R*；R*−GG≥2个百分点时，现金校验失败，降级为 GG |
-| 门槛 II | A股 max(3.5%, Rf+2%)；港股 max(5%, Rf+3%)；美股 max(4%, Rf+2%) |
-| 安全边际 KK | R_eff−II，再加有依据的周期调整 |
-| 目标买入价 | 当前价 × R_eff ÷ II |
-| 门槛价格 | 当前价 × II ÷ R_eff；R_eff≤0时无定义，R_eff≤II时不作为下行保护 |
+| 维持性现金底座 $OE_{\text{cash}}$ | 非金融 $\text{OCF}_{\text{扣息}} - D\&A \times \gamma_{\text{maint}}$；银行 $\min(NP, AA_{2y})$；非银采用周期平滑底座 |
+| 直接分配回报 $R_{\text{dist}}$ | $(NP_{\text{base}} \times \alpha \times p_{\text{dist}}) \div \text{市值}$（含现金分红与注销式回购） |
+| 留存复利回报 $R_{\text{retain}}$ | $[NP_{\text{base}} \times \alpha \times (1 - p_{\text{dist}})_+ \times \eta] \div \text{retain\_denom}$（须通过现金含金量与效率门槛校验；金融须 $\text{ROE} > K_{e,\text{fin}}$ $[9.0\%/9.5\%]$、$\eta_{\max}=0.25$ 且分母取 $\max(\text{市值},\text{净资产})$，否则 $\eta=0$） |
+| 广义穿透 $R_{\text{LT}}$ / 有效 $R_{\text{eff}}$ | $R_{\text{LT}} = R_{\text{dist}} + R_{\text{retain}}$；现金校验合格取 $R_{\text{LT}}$，含金量不足降级为现金分配口径 $R_{\text{cash\_dist}}$ |
+| 要求回报门槛 $R_{\text{req}}(II)$ | A股 $\max(3.5\%, R_f+2\%)$；港股 $\max(5.0\%, R_f+3\%)$；美股 $\max(4.0\%, R_f+2\%)$ |
+| 穿透安全边际 $MoS(KK)$ | $R_{\text{eff}} - R_{\text{req}}$，再加有依据的周期调整 |
+| 穿透目标买入价 $P_{\text{buy}}$ | 当前价 $\times R_{\text{eff}} \div R_{\text{req}}$ |
+| 下行保护参考价 $P_{\text{floor}}$ | 当前价 $\times R_{\text{req}} \div R_{\text{eff}}$（$R_{\text{eff}} \le R_{\text{req}}$ 时无效） |
 
-Rf 取当地十年期国债收益率；M 的承诺、历史分红及保守锚选择须有证据。R_eff≤II 不建仓，完整仓位还需考虑可预测性、价值陷阱风险、商业质量和集中度约束。12个月目标价与龟龟目标买入价分别解释。
+Rf 取当地十年期国债收益率；分红承诺与保守锚选择须有证据。$R_{\text{eff}} \le R_{\text{req}}$ 不建仓，完整仓位还需考虑可预测性、价值陷阱风险、商业质量和集中度约束。12个月目标价与穿透目标买入价分别解释。
+
+### 穿透回报率法五步确定性流程
+
+1. **Step 1｜行业原型识别与盈利基数 $NP_{\text{base}}$**：由 `industry_archetype` 或公司/财报特征自动匹配六大行业原型；非银金融强制触发五年均值平滑 $\min(NP, 1.25 \times 5\text{Y均值})$，抑制券商牛市高点虚高。
+2. **Step 2｜维持性现金底座 $OE_{\text{cash}}$ 与现金含金量体检**：非金融采用 $\text{OCF}_{\text{扣息}} - D\&A \times \gamma_{\text{maint}}$（$\gamma_{\text{maint}} = \min(\gamma_{\text{total}}, \gamma_{\text{cap}})$）剥离扩张性 Capex 错杀；商业银行采用监管可分配盈余底座 $\min(NP, AA_{2y})$；非银采用周期平滑稳态盈余。校验覆盖率 $Cov_{\text{cash}} = OE_{\text{cash}} / (NP_{\text{base}} \cdot \alpha) \ge 0.85$ 且分配偏差 $< 2\%$。
+3. **Step 3｜广义股东分配率 $p_{\text{dist}}$ 与直接分配回报 $R_{\text{dist}}$**：将现金分红率 $p_{\text{div}}$ 与注销式股份回购率 $p_{\text{buyback}}$ 合并计入 $p_{\text{dist}} = \min(1.25, p_{\text{div}} + p_{\text{buyback}})$，核算 $R_{\text{dist}} = (NP_{\text{base}} \cdot \alpha \cdot p_{\text{dist}}) / \text{市值}$。
+4. **Step 4｜双重校验计算留存转化率 $\eta$ 与 $R_{\text{retain}}$**：仅当现金含金量合格且资本效率越过门槛（非金融 $\text{ROIC}_{\text{eff}} \ge R_{\text{req}}+2\%$；金融 $\text{ROE} > K_{e,\text{fin}}$）时分段赋予 $\eta$，否则 $\eta$ **强制归零**。非金融以市值作分母；金融对留存项采用 $\max(\text{市值}, \text{净资产})$ 作分母，消除破净股（$\text{PB}<1$）按 $1/\text{PB}$ 虚增复利悖论。
+5. **Step 5｜合成有效穿透回报率 $R_{\text{eff}}$ 并锚定买价**：现金校验通过时主取 $R_{\text{LT}} = R_{\text{dist}} + R_{\text{retain}}$，含金量不足则直接降级为现金分配口径 $R_{\text{cash\_dist}}$；对照 $R_{\text{req}}$ 给出安全边际 $MoS$、穿透目标买入价 $P_{\text{buy}}$ 与下行保护参考价 $P_{\text{floor}}$（阶段 2 Capex 与分红跃迁另作预期差分析，不混入内生底座）。
+
+### 六大行业分类及参数适配体系
+
+| 行业原型 (`industry_archetype`) | 维持性底座 $OE_{\text{cash}}$ / $\gamma_{\text{cap}}$ | 资本效率指标 | 留存触发门槛 | 留存上限 $\eta_{\max}$ / 斜率尺度 | 留存项分母 `retain_denom` | 专项边界与交叉锚 |
+| --- | --- | --- | --- | --- | --- | --- |
+| **互联网与轻资产科技 (`internet_tech`)** | $\text{OCF}_{\text{扣息}} - \min(\gamma_{\text{total}}, 0.80) \cdot D\&A$ | $\text{ROIC}_{\text{eff}}$ | $\ge R_{\text{req}} + 2\%$ | `0.80` / `15%` | $\text{MarketCap}$ | 注销回购计入 $p_{\text{dist}}$，AI/算力扩张 Capex 不误杀 |
+| **消费品与零售 (`consumer`)** | $\text{OCF}_{\text{扣息}} - \min(\gamma_{\text{total}}, 0.80) \cdot D\&A$ | $\text{ROIC}_{\text{eff}}$ | $\ge R_{\text{req}} + 2\%$ | `0.80` / `15%` | $\text{MarketCap}$ | 扣减超额净现金衡量真实经营投入资本 |
+| **制造业与工业 (`manufacturing`)** | $\text{OCF}_{\text{扣息}} - \min(\gamma_{\text{total}}, 0.90) \cdot D\&A$ | $\text{ROIC}_{\text{eff}}$ | $\ge R_{\text{req}} + 2\%$ | `0.80` / `15%` | $\text{MarketCap}$ | 扩产期不误杀，保留 $\gamma_{\text{maint}}$ 敏感性网格 |
+| **公用事业与基础设施 (`utility_infra`)** | $\text{OCF}_{\text{扣息}} - \min(\gamma_{\text{total}}, 0.90) \cdot D\&A$ | $\text{ROIC}_{\text{eff}}$ | $\ge R_{\text{req}} + 2\%$ | `0.55` / `12%` | $\text{MarketCap}$ | 未来 Capex 退坡与分红跃迁单列于预期差 B4.7（图19–21） |
+| **商业银行 (`bank`)** | 监管可分配盈余 $\min(NP, AA_{2y})$（$\gamma=0$） | $\text{ROE}$ | $> K_{e,\text{fin}} = \max(9.0\%, R_{\text{req}}+2\%)$ | `0.25` / `5%` | $\max(\text{MarketCap}, \text{BookEquity})$ | 叠加净息差/不良率/拨备覆盖率与 PB-ROE |
+| **非银金融 (`non_bank_fin`)** | 周期平滑 $\min(NP, 1.25 \cdot 5\text{Y均值})$（$\gamma=0$） | 平滑后 $\text{ROE}$ | $> K_{e,\text{fin}} = \max(9.5\%, R_{\text{req}}+2\%)$ | `0.25` / `5%` | $\max(\text{MarketCap}, \text{BookEquity})$ | 保险参考 P/EV 与 NBV；券商严控牛市顶点泡沫 |
+| **防守降级（任一原型不达标）** | $Cov_{\text{cash}} < 0.85$ 或 $\Delta c_{\text{dist}} \ge 2\%$ | 未过上述效率门槛 | — | **强制 $\eta = 0.0$** | — | 现金含金量不足时直接降级现金分配口径 $R_{\text{cash\_dist}}$ |
 
 确定性计算示例，在批次目录执行：
 
 ```bash
-python scripts/calc_penetration_return.py --config "input/穿透回报率_输入.json" --out "reports/穿透回报率_输出.json"
+python scripts/calc_penetration_return.py --config "input/穿透回报率_输入.json" --v3 --out "reports/穿透回报率_输出.json" --json
 ```
 
 原始数据和计算 JSON 保留各脚本定义的单位与精度；对读者展示的金额统一亿元／万元，股数统一亿股／万股，数字最多两位小数。每股价格、单价和实物数量按其自身单位展示，切换单位须同步换算。
@@ -202,6 +237,8 @@ python scripts/template_regression.py --selfcheck
 
 2026-11-13 阶段 2 集成验证：新增与管线定向测试（`test_capex_dividend_engine.py`、`test_chart_exemptions.py`、`test_report_build_pipeline.py`、`test_gate_incremental.py`、`test_v3_regression.py`）**90 项全部通过**，全图正向模板回归 `template_regression.py` 通过（`FAIL=0 WARN=4 rc=0`）；全量离线套件实测 **1615 项通过**（另有 9 项源自原基线 `test_chart_periods.py` / `test_pipeline_repairs.py` / `test_valuation_repairs.py` 的既有用例失败，本次改动未引入回归）。
 
+2026-11-20 穿透回报率法 v3 与六大行业校准验证：`calc_penetration_return.py --selftest` 通过；`python -m unittest tests/test_look_through_v3_multi_industry.py -v` **6 项核心回归全部通过**；全图正向模板回归 `template_regression.py` 通过（`FAIL=0 WARN=4 rc=0`，`report_template_qc.py` `FAIL 0 | WARN 0`）；覆盖银行、非银、互联网、制造、消费与公用事业 6 大行业 11 家典型标的实测收敛。
+
 模板以本仓库为真源。修复应回写 `scripts/`，补充有意义的回归检查，再同步至研究批次；不能只修单份 PNG 或项目副本。工程约束见 [engineering-notes.md](references/engineering-notes.md)，最新期间和排版契约见 [chart-period-contract.md](references/chart-period-contract.md)。
 
 ## 仓库导航
@@ -211,7 +248,7 @@ python scripts/template_regression.py --selfcheck
 | [SKILL.md](SKILL.md) | 技能入口、触发规则与执行要求 |
 | [references/](references/) | 框架、方法论、报告模板、交付与跟踪规范 |
 | [scripts/](scripts/) | 数据、体检、图表、估值、成稿和复验工具 |
-| [strategies/](strategies/) / [shared/qualitative/](shared/qualitative/) | 龟龟、独立估值及商业质量分析流程 |
+| [strategies/](strategies/) / [shared/qualitative/](shared/qualitative/) | 穿透回报率策略、独立估值及商业质量分析流程 |
 | [tests/](tests/) | 单元测试、契约检查及离线回归 |
 | [CHANGELOG.md](CHANGELOG.md) | 版本与修复记录 |
 

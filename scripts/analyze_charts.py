@@ -1317,7 +1317,7 @@ def fig_targets(ops: dict) -> plt.Figure | None:
     labels, vals = d["labels"], d["values"]
     colors = []
     for lab in labels:
-        if "龟龟" in lab: colors.append("#DD8452")
+        if "穿透" in lab or "龟龟" in lab: colors.append("#DD8452")
         elif "悲观" in lab: colors.append("#C44E52")
         elif "乐观" in lab: colors.append("#55A868")
         elif "当前" in lab: colors.append("#4C72B0")
@@ -1359,7 +1359,7 @@ def fig_penetration(ops: dict) -> plt.Figure | None:
     ax.set_ylabel("穿透回报率（%）", fontsize=11, labelpad=10)
     ax.axhline(0, color="#888888", lw=0.9, alpha=0.55)
     ax.set_ylim(lo - max(label_pad, span * 0.12), hi + max(label_pad, span * 0.18))
-    ax.set_title("图10 穿透回报率 GG vs 门槛 II → §6 估值", fontsize=13, fontweight="bold", pad=12)
+    ax.set_title(_section_title(d.get("标题"), "图10 穿透回报率 vs 门槛对比", "§6 估值"), fontsize=13, fontweight="bold", pad=12)
     _apply_clean_chart_style(ax, grid_axis="y", pad=7, labelpad=10)
     ax.text(0.5, -0.14, d.get("注", SRC), ha="center", fontsize=8, color="gray", transform=ax.transAxes)
     return fig
