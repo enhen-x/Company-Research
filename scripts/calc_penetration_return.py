@@ -304,6 +304,49 @@ def _detect_ma_scale_jump(
     return no_adj
 
 
+def _compute_fin_growth_realization(
+    cfg: dict,
+    *,
+    roic_eff: float | None,
+    retained_share: float,
+    c_eff: float,
+    ma_detected: bool,
+    ma_f_full_year: float,
+) -> tuple[float, float | None, float | None]:
+    """金融板块近5年实际利润增速兑现度 ρ_g（防静态高 ROE 与真实增长脱节导致留存高估）。"""
+    g_theo = (roic_eff * retained_share) if (roic_eff is not None and retained_share > 0) else None
+    raw_seq = cfg.get('net_profit_series') or cfg.get('surplus_series') or []
+    perf_seq: list[float] = []
+    for item in raw_seq:
+        v = _finite_num(item)
+        if v is None:
+            break
+        perf_seq.append(v)
+
+    if len(perf_seq) < 3 or g_theo is None or g_theo <= 0:
+        return 1.0, g_theo, None
+
+    y0 = c_eff if (ma_detected and ma_f_full_year > 1.0) else perf_seq[0]
+    if y0 <= 0:
+        g_actual = -1.0
+    else:
+        g_2y = ((y0 / perf_seq[2]) ** 0.5 - 1.0) if perf_seq[2] > 0 else None
+        g_long = (
+            ((y0 / perf_seq[-1]) ** (1.0 / (len(perf_seq) - 1)) - 1.0)
+            if len(perf_seq) >= 4 and perf_seq[-1] > 0
+            else g_2y
+        )
+        if g_2y is not None and g_long is not None:
+            g_actual = min(g_long, 0.6 * g_2y + 0.4 * g_long)
+        elif g_long is not None:
+            g_actual = g_long
+        else:
+            g_actual = 0.0
+
+    rho_g = min(1.0, max(0.0, g_actual / g_theo))
+    return rho_g, g_theo, g_actual
+
+
 def _compute_look_through_v3(
     cfg: dict,
     *,
@@ -444,6 +487,18 @@ def _compute_look_through_v3(
     eta_max = _ETA_MAX_CAP[archetype]
     spread_scale = _ETA_SPREAD_SCALE[archetype]
     fin_ke = max(_FIN_KE_HURDLE[archetype], II + 0.02) if is_fin else None
+    g_theo = (roic_eff * retained_share) if (roic_eff is not None and retained_share > 0) else None
+    g_actual: float | None = None
+    rho_g = 1.0
+    if is_fin:
+        rho_g, g_theo, g_actual = _compute_fin_growth_realization(
+            cfg,
+            roic_eff=roic_eff,
+            retained_share=retained_share,
+            c_eff=c_eff,
+            ma_detected=ma_info['detected'],
+            ma_f_full_year=ma_info['f_full_year'],
+        )
     if not cash_quality_passed:
         eta = 0.0
         eta_reason = f'现金含金量校验未通过（Cov_cash={cash_coverage:.2f}<0.85 或现金偏差≥2%），留存转化率 η 强制归零'
@@ -461,11 +516,17 @@ def _compute_look_through_v3(
                 f'留存仅补充监管资本，η 置零'
             )
         else:
-            raw_eta = eta_max * (roic_eff - fin_ke) / spread_scale
-            eta = round(min(eta_max, max(0.0, raw_eta)), 4)
+            raw_eta = min(eta_max, max(0.0, eta_max * (roic_eff - fin_ke) / spread_scale))
+            eta = round(raw_eta * rho_g, 4)
+            rho_desc = (
+                f'，增速兑现度 ρ_g={rho_g:.2f}'
+                f'（实际复合 {g_actual*100:.2f}% vs 理论内生 {g_theo*100:.2f}%）'
+                if g_actual is not None and g_theo is not None
+                else ''
+            )
             eta_reason = (
                 f'现金含金量合格且金融 ROE={roic_eff*100:.2f}% 超权益资本成本 Ke={fin_ke*100:.2f}% '
-                f'+{(roic_eff-fin_ke)*100:.2f}pct → η={eta:.4f}（{archetype_cn}上限 {eta_max:.2f}）'
+                f'+{(roic_eff-fin_ke)*100:.2f}pct{rho_desc} → η={eta:.4f}（{archetype_cn}上限 {eta_max:.2f}）'
             )
     elif roic_eff < II + 0.02:
         eta = 0.0
@@ -533,6 +594,9 @@ def _compute_look_through_v3(
         'roic_eff': roic_eff,
         'roic_basis': roic_basis,
         'fin_ke_hurdle': fin_ke,
+        'growth_realization_rho': round(rho_g, 4),
+        'g_theoretical': g_theo,
+        'g_actual': g_actual,
         'retain_denominator': retain_denom,
         'pb_discount_applied': pb_discount_applied,
         'eta': eta,

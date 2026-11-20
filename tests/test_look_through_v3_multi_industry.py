@@ -247,12 +247,40 @@ class TestLookThroughV3MultiIndustry(unittest.TestCase):
         self.assertEqual(infer_industry_archetype(bank), "bank")
         r_bank = compute(bank, v3=True)["look_through_v3"]
         self.assertTrue(r_bank["cash_quality_passed"])
+        self.assertEqual(r_bank["growth_realization_rho"], 1.0)
         self.assertGreater(r_bank["eta"], 0.15)
         self.assertLessEqual(r_bank["eta"], 0.25)
         self.assertTrue(r_bank["pb_discount_applied"])
         self.assertEqual(r_bank["retain_denominator"], 1180000.0)
         self.assertGreater(r_bank["r_lt"], r_bank["r_dist"])
         self.assertLess(r_bank["r_retain"], 0.02)
+
+        # Real 5-year series CMB: NIM compression (2Y CAGR ~1.21% vs theoretical ~8.40%) pulls rho_g ~0.36
+        bank_real_series = _base_cfg(
+            company="招商银行实证",
+            industry_archetype="bank",
+            depreciation_D=0.0,
+            capex_ratio_G=0.0,
+            price=43.12,
+            market_cap=1087479.74,
+            shares=25219.845601,
+            net_profit_C=150181.0,
+            aa_2y=149286.0,
+            aa_all=140621.6,
+            payout_M=0.3385,
+            rf=0.016055,
+            book_equity=1181997.0,
+            net_profit_series=[150181.0, 148391.0, 146602.0, 138012.0, 119922.0],
+            cash_balance=None,
+            interest_bearing_debt=None,
+        )
+        r_bank_real = compute(bank_real_series, v3=True)["look_through_v3"]
+        self.assertGreater(r_bank_real["growth_realization_rho"], 0.34)
+        self.assertLess(r_bank_real["growth_realization_rho"], 0.39)
+        self.assertGreater(r_bank_real["eta"], 0.06)
+        self.assertLess(r_bank_real["eta"], 0.09)
+        self.assertGreaterEqual(r_bank_real["target_buy"], 49.5)
+        self.assertLessEqual(r_bank_real["target_buy"], 51.5)
 
         broken_pb_bank = _base_cfg(
             company="兴业银行示例",
@@ -274,6 +302,28 @@ class TestLookThroughV3MultiIndustry(unittest.TestCase):
         self.assertEqual(r_cib["retain_denominator"], 820000.0)
         self.assertLess(r_cib["eta"], 0.10)
         self.assertLess(r_cib["r_retain"], 0.005)
+
+        # Negative 5-year profit growth -> rho_g == 0.0 and eta == 0.0 (pure dividend fallback)
+        neg_growth_bank = _base_cfg(
+            company="兴业负增长示例",
+            industry_archetype="bank",
+            depreciation_D=0.0,
+            capex_ratio_G=0.0,
+            net_profit_C=77469.0,
+            aa_2y=77337.0,
+            aa_all=81169.4,
+            payout_M=0.30,
+            roe=0.0945,
+            book_equity=820000.0,
+            market_cap=385400.0,
+            surplus_series=[77469.0, 77205.0, 77116.0, 91377.0, 82680.0],
+            cash_balance=None,
+            interest_bearing_debt=None,
+        )
+        r_cib_neg = compute(neg_growth_bank, v3=True)["look_through_v3"]
+        self.assertEqual(r_cib_neg["growth_realization_rho"], 0.0)
+        self.assertEqual(r_cib_neg["eta"], 0.0)
+        self.assertAlmostEqual(r_cib_neg["r_retain"], 0.0, places=6)
 
         broker_peak = _base_cfg(
             company="纯周期高点券商",
@@ -324,7 +374,8 @@ class TestLookThroughV3MultiIndustry(unittest.TestCase):
         self.assertTrue(r_ma["ma_scale_adjusted"])
         self.assertGreater(r_ma["np_base"], 30000.0)
         self.assertGreater(r_ma["aa_all_pro_forma"], 25000.0)
-        # Combined full-year pro-forma ROE ~9.66% > Ke_fin 6.50% -> eta > 0.10, buy price in [14.5, 15.5] (> 14.38 pre-924 low)
+        # Combined full-year pro-forma ROE ~9.66% > Ke_fin 6.50% -> rho_g=1.0, eta > 0.10, buy price in [14.5, 15.5] (> 14.38 pre-924 low)
+        self.assertEqual(r_ma["growth_realization_rho"], 1.0)
         self.assertGreater(r_ma["eta"], 0.10)
         self.assertGreaterEqual(r_ma["target_buy"], 14.5)
         self.assertLessEqual(r_ma["target_buy"], 15.5)
@@ -352,6 +403,7 @@ class TestLookThroughV3MultiIndustry(unittest.TestCase):
         self.assertTrue(r_ma_rev["ma_scale_adjusted"])
         self.assertGreater(r_ma_rev["np_base"], 30000.0)
         self.assertTrue(r_ma_rev["cash_quality_passed"])
+        self.assertEqual(r_ma_rev["growth_realization_rho"], 1.0)
         self.assertGreater(r_ma_rev["eta"], 0.10)
         self.assertGreaterEqual(r_ma_rev["target_buy"], 14.5)
         self.assertLessEqual(r_ma_rev["target_buy"], 15.5)

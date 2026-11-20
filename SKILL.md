@@ -281,8 +281,8 @@ B3 完成后自动运行 `scripts/financial_health_check.py`，生成 `reports/�
 | **互联网与轻资产科技 (`internet_tech`)** | $\text{OCF}_{\text{扣息}} - 0.80 \cdot D\&A$（剥离 AI/算力扩张 Capex） | $\text{ROIC}_{\text{eff}}$（含注销式回购纳入 $p_{\text{dist}}$） | `0.80` | SOTP 分部 / EV/EBITDA / 现金调整 PE |
 | **消费品与零售 (`consumer`)** | $\text{OCF}_{\text{扣息}} - 0.80 \cdot D\&A$ | $\text{ROIC}_{\text{eff}}$（扣除冗余超额净现金） | `0.80` | 品牌壁垒与渠道存货周转体检 |
 | **制造业与工业 (`manufacturing`)** | $\text{OCF}_{\text{扣息}} - 0.90 \cdot D\&A$（扩产 Capex 不误杀） | $\text{ROIC}_{\text{eff}} = NP / (E + \text{NetDebt})$ | `0.80` | 扩产→收缩期保留 $\gamma_{\text{maint}}$ 敏感性网格 |
-| **商业银行 (`bank`)** | $\min(NP, AA_{2y})$（监管核心一级资本可分配底座） | 净资产收益率 $\text{ROE}$（门槛 $K_{e,\text{fin}}=7.5\%$） | `0.25`（分母 $\max(\text{市值},\text{净资产})$） | 叠加净息差/不良率/拨备覆盖率与 PB-ROE |
-| **非银金融 (`non_bank_fin`)** | 周期平滑稳态盈余（$NP_{\text{norm}} = \min(NP_{\text{pf}}, 1.25 \cdot 5\text{Y备考均值})$，并购首年按加权净资产全期年化） | 周期平滑后 $\text{ROE}$（门槛 $K_{e,\text{fin}}=6.5\%$） | `0.25`（分母 $\max(\text{市值},\text{净资产})$） | 保险叠加 EV/NBV；券商防牛市顶点高估与并购跨期错配 |
+| **商业银行 (`bank`)** | $\min(NP, AA_{2y})$（监管核心一级资本可分配底座） | 净资产收益率 $\text{ROE}$（门槛 $K_{e,\text{fin}}=7.5\%$） | `0.25 × ρ_g`（分母 $\max(\text{市值},\text{净资产})$） | $\rho_g$ 按近 5 年利润实际增速/理论内生增速自动校准；叠加 PB-ROE |
+| **非银金融 (`non_bank_fin`)** | 周期平滑稳态盈余（$NP_{\text{norm}} = \min(NP_{\text{pf}}, 1.25 \cdot 5\text{Y备考均值})$，并购首年按加权净资产全期年化） | 周期平滑后 $\text{ROE}$（门槛 $K_{e,\text{fin}}=6.5\%$） | `0.25 × ρ_g`（分母 $\max(\text{市值},\text{净资产})$） | 保险叠加 EV/NBV；券商防牛市顶点高估与并购跨期错配；同步受 $\rho_g$ 约束 |
 | **公用事业与基础设施 (`utility_infra`)** | $\text{OCF}_{\text{扣息}} - 0.90 \cdot D\&A$ | $\text{ROIC}_{\text{eff}}$ | `0.55` | Capex 规划拐点与分红跃迁单独入预期差 B4.7（图19–21） |
 | **现金含金量不达标 / 低效留存防御** | $Cov_{\text{cash}} < 0.85$ 或 $\text{ROIC}_{\text{eff}} < R_{\text{req}} + 2\%$（金融 $\text{ROE} \le K_{e,\text{fin}}$） | — | **强制归零 (`0.0`)** | 含金量不足时直接降级现金分配口径 $R_{\text{cash\_dist}}$ |
 
@@ -291,7 +291,7 @@ B3 完成后自动运行 `scripts/financial_health_check.py`，生成 `reports/�
 - **维持性资本开支**：$\text{Capex}_{\text{maint}} = D\&A \times \gamma_{\text{maint}}$（$\gamma_{\text{maint}} = \min(\gamma_{\text{total}}, \gamma_{\text{cap}})$）；$OE = NP + D\&A - \text{Capex}_{\text{maint}}$
 - **维持性现金底座 $OE_{\text{cash}}$**：非金融 $\text{OCF}_{\text{扣息}} - \text{Capex}_{\text{maint}}$；金融采用监管可分配盈余与五年周期平滑底座
 - **广义分配率 $p_{\text{dist}}$**：现金分红支付率 $p_{\text{div}}$ + 注销式股份回购率 $p_{\text{buyback}}$
-- **广义主穿透回报率 $R_{\text{LT}}$**：$R_{\text{dist}} + R_{\text{retain}} = \frac{NP_{\text{base}} \cdot \alpha \cdot p_{\text{dist}}}{\text{市值}} + \frac{NP_{\text{base}} \cdot \alpha \cdot (1 - p_{\text{dist}})_+ \cdot \eta}{\text{retain\_denom}}$（非金融取市值；金融取 $\max(\text{市值}, \text{净资产})$ 且须 $\text{ROE} > K_{e,\text{fin}}$）
+- **广义主穿透回报率 $R_{\text{LT}}$**：$R_{\text{dist}} + R_{\text{retain}} = \frac{NP_{\text{base}} \cdot \alpha \cdot p_{\text{dist}}}{\text{市值}} + \frac{NP_{\text{base}} \cdot \alpha \cdot (1 - p_{\text{dist}})_+ \cdot \eta}{\text{retain\_denom}}$（非金融取市值；金融取 $\max(\text{市值}, \text{净资产})$ 且 $\eta$ 受 $K_{e,\text{fin}}$ 与近 5 年利润增速兑现度 $\rho_g$ 约束）
 - **现金校验率 $R_{\text{cash}}$ 与有效穿透回报率 $R_{\text{eff}}$**：现金含金量合格时取 $R_{\text{LT}}$；含金量不足直接降级现金口径并强制 $\eta=0$
 - **要求回报门槛 $R_{\text{req}}(II)$**：A 股 $\max(3.5\%, R_f + 2\%)$；港股 $\max(5.0\%, R_f + 3\%)$；美股 $\max(4.0\%, R_f + 2\%)$
 - **穿透安全边际 $MoS(KK)$**：$R_{\text{eff}} - R_{\text{req}} + \Delta_{\text{cycle}}$
