@@ -6,9 +6,14 @@ Compatible with both ``python -m unittest`` and ``pytest``.
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import unittest
+
+import pandas as pd
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
@@ -267,28 +272,146 @@ class TestLookThroughV3MultiIndustry(unittest.TestCase):
         r_cib = compute(broken_pb_bank, v3=True)["look_through_v3"]
         self.assertTrue(r_cib["pb_discount_applied"])
         self.assertEqual(r_cib["retain_denominator"], 820000.0)
-        self.assertLess(r_cib["eta"], 0.02)
-        self.assertLess(r_cib["r_retain"], 0.001)
+        self.assertLess(r_cib["eta"], 0.10)
+        self.assertLess(r_cib["r_retain"], 0.005)
 
         broker_peak = _base_cfg(
-            company="国泰海通",
+            company="纯周期高点券商",
+            industry_archetype="non_bank_fin",
             depreciation_D=0.0,
             capex_ratio_G=0.0,
-            net_profit_C=28000.0,  # Bull-market peak vs 5Y avg 15000
+            net_profit_C=28000.0,  # Pure cyclical peak vs 5Y avg 15000 (flat equity)
             aa_2y=21000.0,
             aa_all=15000.0,
             payout_M=0.32,
             book_equity=330000.0,
+            book_equity_series=[330000.0, 315000.0, 305000.0, 298000.0, 290000.0],
+            net_profit_series=[28000.0, 14000.0, 10000.0, 11000.0, 12000.0],
             market_cap=290000.0,
             cash_balance=None,
             interest_bearing_debt=None,
         )
-        self.assertEqual(infer_industry_archetype(broker_peak), "non_bank_fin")
         r_brk = compute(broker_peak, v3=True)["look_through_v3"]
-        # Normalized base must damp 28000 down to 1.25 * 15000 = 18750 (ROE_norm=5.68% < Ke=9.5% -> eta=0)
+        self.assertFalse(r_brk["ma_scale_adjusted"])
+        # Normalized base must damp 28000 down to 1.25 * 15000 = 18750 (ROE_norm=5.68% < Ke=6.50% -> eta=0)
         self.assertAlmostEqual(r_brk["np_base"], 18750.0, places=2)
         self.assertEqual(r_brk["eta"], 0.0)
         self.assertEqual(r_brk["r_retain"], 0.0)
+
+        # Scenario B: M&A share-swap merger (Guotai Haitong style) with balance sheet series (Path A)
+        broker_ma_bs = _base_cfg(
+            company="国泰海通",
+            depreciation_D=0.0,
+            capex_ratio_G=0.0,
+            price=16.54,
+            market_cap=290791.0,
+            shares=17581.0746,
+            net_profit_C=27809.2,
+            aa_2y=20416.65,
+            aa_all=15345.94,
+            payout_M=0.316,
+            rf=0.0175,
+            book_equity=330416.8,
+            book_equity_series=[320441.5, 155828.4, 147050.6, 141671.4, 136052.0],
+            shares_series=[17628.9, 8903.7, 8903.7, 8904.5, 8906.7],
+            net_profit_series=[27809.2, 13024.1, 9374.1, 11508.8, 15013.5],
+            revenue_series=[63107.4, 33675.5, 36141.3, 35471.3, 42817.1],
+            cash_balance=None,
+            interest_bearing_debt=None,
+        )
+        self.assertEqual(infer_industry_archetype(broker_ma_bs), "non_bank_fin")
+        r_ma = compute(broker_ma_bs, v3=True)["look_through_v3"]
+        self.assertTrue(r_ma["ma_scale_adjusted"])
+        self.assertGreater(r_ma["np_base"], 30000.0)
+        self.assertGreater(r_ma["aa_all_pro_forma"], 25000.0)
+        # Combined full-year pro-forma ROE ~9.66% > Ke_fin 6.50% -> eta > 0.10, buy price in [14.5, 15.5] (> 14.38 pre-924 low)
+        self.assertGreater(r_ma["eta"], 0.10)
+        self.assertGreaterEqual(r_ma["target_buy"], 14.5)
+        self.assertLessEqual(r_ma["target_buy"], 15.5)
+
+        # Scenario C: M&A fallback via revenue step + goodwill/scale ROE (Path B without book_equity_series)
+        broker_ma_rev = _base_cfg(
+            company="国泰海通",
+            depreciation_D=0.0,
+            capex_ratio_G=0.0,
+            price=16.54,
+            market_cap=290791.0,
+            shares=17581.0746,
+            net_profit_C=27809.2,
+            aa_2y=20416.65,
+            aa_all=15345.94,
+            payout_M=0.316,
+            rf=0.0175,
+            book_equity=330416.8,
+            goodwill=4052.4,
+            revenue_series=[63107.4, 33675.5, 36141.3, 35471.3, 42817.1],
+            cash_balance=None,
+            interest_bearing_debt=None,
+        )
+        r_ma_rev = compute(broker_ma_rev, v3=True)["look_through_v3"]
+        self.assertTrue(r_ma_rev["ma_scale_adjusted"])
+        self.assertGreater(r_ma_rev["np_base"], 30000.0)
+        self.assertTrue(r_ma_rev["cash_quality_passed"])
+        self.assertGreater(r_ma_rev["eta"], 0.10)
+        self.assertGreaterEqual(r_ma_rev["target_buy"], 14.5)
+        self.assertLessEqual(r_ma_rev["target_buy"], 15.5)
+
+    def test_build_penetration_input_avoids_ma_share_inflation_on_historical_payout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tpath = Path(tmp)
+            data = tpath / "data"
+            out = tpath / "input"
+            data.mkdir()
+            dates = [f"{y}-12-31" for y in range(2021, 2026)]
+            # Share count & book equity double in 2025 due to M&A, while per-share DPS stays stable (~30% payout)
+            pd.DataFrame({
+                "REPORT_DATE": dates,
+                "OPERATE_INCOME": [350e8, 350e8, 360e8, 340e8, 650e8],
+                "PARENT_NETPROFIT": [110e8, 110e8, 100e8, 130e8, 270e8],
+                "BASIC_EPS": [1.10, 1.10, 1.00, 1.30, 1.50],
+                "TOTAL_PROFIT": [130e8, 130e8, 120e8, 150e8, 320e8],
+                "FE_INTEREST_EXPENSE": [0.0] * 5,
+            }).to_csv(data / "利润表_按报告期.csv", index=False, encoding="utf-8-sig")
+            pd.DataFrame({
+                "REPORT_DATE": dates,
+                "NETCASH_OPERATE": [120e8, 120e8, 120e8, 150e8, 300e8],
+                "CONSTRUCT_LONG_ASSET": [20e8] * 5,
+                "DEPR_AMORT": [30e8] * 5,
+            }).to_csv(data / "现金流量表_按报告期.csv", index=False, encoding="utf-8-sig")
+            pd.DataFrame({
+                "REPORT_DATE": dates,
+                "SHARE_CAPITAL": [100e8, 100e8, 100e8, 100e8, 200e8],
+                "MONETARYFUNDS": [500e8] * 5,
+                "SHORT_LOAN": [100e8] * 5,
+                "LONG_LOAN": [100e8] * 5,
+                "TOTAL_CURRENT_ASSETS": [800e8] * 5,
+                "TOTAL_CURRENT_LIAB": [400e8] * 5,
+                "TOTAL_PARENT_EQUITY": [1500e8, 1520e8, 1550e8, 1600e8, 3250e8],
+                "OTHER_EQUITY_TOOL": [100e8] * 5,
+            }).to_csv(data / "资产负债表_按报告期.csv", index=False, encoding="utf-8-sig")
+            # Annual DPS: 2021..2023 = 0.30/sh, 2024 = 0.40/sh (on 10B sh -> 30.8%), 2025 = 0.45/sh (on 20B sh -> 33.3%)
+            pd.DataFrame({
+                "报告期": dates,
+                "现金分红-现金分红比例": [3.0, 3.0, 3.0, 4.0, 4.5],
+            }).to_csv(data / "分红送配记录.csv", index=False, encoding="utf-8-sig")
+            pd.DataFrame({
+                "日期": ["2026-10-19", "2026-10-18"],
+                "收盘": [16.5, 16.4],
+            }).to_csv(data / "日线股价.csv", index=False, encoding="utf-8-sig")
+
+            out.mkdir(parents=True, exist_ok=True)
+            res = subprocess.run(
+                [sys.executable, str(SCRIPTS / "build_penetration_input.py"),
+                 "--data", str(data), "--out", str(out), "--company", "并购测试证券", "--code", "609999"],
+                capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(res.returncode, 0, msg=res.stderr)
+            cfg = json.loads((out / "穿透回报率_输入.json").read_text(encoding="utf-8"))
+            self.assertIn("book_equity_series", cfg)
+            self.assertIn("shares_series", cfg)
+            # Without historical-share matching, 2023/2024 payouts would blow up to 60%/61.5%; with fix, mean stays ~0.31
+            self.assertLess(cfg["payout_M_mean"], 0.40)
+            self.assertAlmostEqual(cfg["payout_M"], 0.30, places=2)
 
     def test_formal_render_no_colloquial_or_million_tokens(self):
         cfg = _base_cfg()

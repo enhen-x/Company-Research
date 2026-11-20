@@ -245,8 +245,25 @@ def main():
     div = pd.read_csv(data/"分红送配记录.csv",encoding="utf-8-sig")
     dps = dps_by_fiscal_year(div)
     years = [dt.year for dt in reversed(dates)]
+    bs_shares = newest([amount_at(row, "SHARE_CAPITAL") for _, row in bs.iterrows()])
+    def _row_book_eq(row):
+        eq = amount_at(row, "TOTAL_PARENT_EQUITY")
+        if eq is None:
+            return None
+        oe_tool = amount_at(row, "OTHER_EQUITY_TOOL")
+        return (eq - oe_tool) if oe_tool is not None else eq
+    book_equity_series = newest([_row_book_eq(row) for _, row in bs.iterrows()])
     compatible_dividend = "财政年度" not in div.columns and args.quote_fx == 1.0
-    m2 = [float(dps.loc[y])*shares/profits[i] for i,y in enumerate(years[:3]) if y in dps.index and profits[i]>0] if compatible_dividend else []
+    m2 = []
+    ma_payout_notes = []
+    if compatible_dividend:
+        for i, y in enumerate(years[:3]):
+            if y in dps.index and profits[i] > 0:
+                yr_sh = bs_shares[i] if (i < len(bs_shares) and bs_shares[i] and bs_shares[i] > 0) else shares
+                use_sh = yr_sh if abs(yr_sh - shares) / shares > 0.10 else shares
+                if use_sh != shares:
+                    ma_payout_notes.append(f"{y}年分红支付率按当期股本{use_sh:.2f}百万股配比（防并购扩股虚增历史分红率）")
+                m2.append(float(dps.loc[y]) * use_sh / profits[i])
     m1 = [float(dps.loc[y])/eps[i] for i,y in enumerate(years[:3]) if y in dps.index and eps[i]>0] if compatible_dividend else []
     payout = args.payout if args.payout is not None else min(m2) if m2 else None
     if payout is None or not 0<=payout<=1:
@@ -268,6 +285,8 @@ def main():
                      "Rf默认或传入值仍须核对估值日；货币资金须补核受限资金"])
     if len(m2)<3:
         warnings.append("历史支付率不足3个可核实财年，最低档仅为部分观察；须核查缺失年度")
+    if ma_payout_notes:
+        warnings.extend(ma_payout_notes)
     if profile_cap and abs(cap-profile_cap)/profile_cap>.03:
         warnings.append("price×shares与概况市值偏差超过3%，须核对时点及股本")
     segments = [(surplus[i]-surplus[i+1])/(revenues[i]-revenues[i+1]) for i in range(len(surplus)-1) if revenues[i]!=revenues[i+1]]
@@ -317,7 +336,8 @@ def main():
            "rf":args.rf,"cycle_adjust_pct":0,"base_revenue":revenues[0],"lambda":lam,"surplus_series":surplus,
            "lambda_policy":lambda_policy,"lambda_reliable":reliable,
            "lambda_diagnostics":lambda_diagnostics,"financial_years":years,
-           "revenue_series":revenues,"fcf":ocf[0]-capex[0],"goodwill":amount_at(bs.iloc[-1],"GOODWILL"),
+           "revenue_series":revenues,"net_profit_series":profits,"book_equity_series":book_equity_series,"shares_series":bs_shares,
+           "fcf":ocf[0]-capex[0],"goodwill":amount_at(bs.iloc[-1],"GOODWILL"),
            "total_assets":amount_at(bs.iloc[-1],"TOTAL_ASSETS"),"dps":float(dps.loc[years[0]]) if years[0] in dps.index else None,
            "low_10y_close":None,"low_10y_close_verified":False,"financial_period":str(dates[-1].date()),**snapshot}
     if args.c_fwd is not None:

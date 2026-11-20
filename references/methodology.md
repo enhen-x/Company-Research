@@ -23,7 +23,7 @@
 
 | 正式中文术语 | 正式符号 | `formal_metrics` JSON 键 | 底层兼容别名 | 口径与取值约束 |
 |---|---|---|---|---|
-| 归母净利润 | $NP$ | `net_profit_NP` | `net_profit_C` / `C` | 近1完整财年；非银金融采用 $\min(NP, 1.25 \times 5\text{Y均值})$ 抑制牛市顶点虚高 |
+| 归母净利润 | $NP$ | `net_profit_NP` | `net_profit_C` / `C` | 近1完整财年；非银金融采用 $\min(NP, 1.25 \times 5\text{Y均值})$ 抑制牛市顶点虚高（若存在重大吸收合并/扩表跃迁，先按净资产或营收体量倍率还原同口径 5Y 备考均值） |
 | 折旧与摊销 | $D\&A$ | `depreciation_DA` | `depreciation_D` / `D` | 固定资产、无形资产与使用权资产摊销；金融业为 0 |
 | 总资本开支强度 | $\gamma_{\text{total}}$ | `total_capex_intensity` | `capex_ratio_G` | 近 3 年 $\text{Capex}_{\text{total}}/D\&A$；**扩产→收缩切换期保留敏感性网格** |
 | 维持性资本开支系数 | $\gamma_{\text{maint}}$ | `maint_capex_factor_gamma` | `G` | 维持现有规模与竞争力的资本开支占 $D\&A$ 比例：消费/互联网上限 $0.80$、制造/公用上限 $0.90$、金融 $=0$ |
@@ -31,10 +31,10 @@
 | 账面股东盈余 | $OE$ | `owner_earnings_OE` | `OE` | $NP + D\&A - \text{Capex}_{\text{maint}}$ |
 | 维持性现金股东盈余 | $OE_{\text{cash}}$ | `maint_cash_owner_earnings` | — | 非金融：$\text{OCF}_{\text{扣息}} - \text{Capex}_{\text{maint}}$；银行：$\min(NP, AA_{2y})$；非银：周期平滑稳态盈余 |
 | 历史自由现金结余 | $FCF_{\text{surplus}}$ | `free_cash_surplus` | `aa_2y` / `AA` | 扣除全部 Capex 后的历史可支配现金结余均值（敏感性压力测试仍沿用全口径严苛底座） |
-| 广义股东分配率 | $p_{\text{dist}}$ | `total_distribution_ratio_p` | `payout_M` / `M` | 现金分红支付率 $p_{\text{div}}$ + 注销式股份回购率 $p_{\text{buyback}}$；分红保守锚优先承诺最低值→近3年最低档 |
+| 广义股东分配率 | $p_{\text{dist}}$ | `total_distribution_ratio_p` | `payout_M` / `M` | 现金分红支付率 $p_{\text{div}}$ + 注销式股份回购率 $p_{\text{buyback}}$；分红保守锚优先承诺最低值→近3年最低档（若历史年度总股本变化 $>10\%$，按当期实有股本配比防扩股虚增） |
 | 盈利确定性折算系数 | $\alpha$ | `profit_reliability_alpha` | `profit_discount_k` / `k` | 强可预测 $0.9$ / 中 $0.8$ / 弱 $0.7$；默认 $0.8$ |
 | 有效投入资本回报率 | $\text{ROIC}_{\text{eff}}$ | `effective_capital_return` | — | 非金融：$\frac{NP_{\text{base}}}{\max(0.25 \cdot E, E + \text{NetDebt})}$ 或显式 `roic`；金融：$\text{ROE} = \frac{NP_{\text{base}}}{\text{BookEquity}}$ |
-| 留存再投资转化率 | $\eta$ | `reinvestment_efficiency_eta` | — | 非金融当现金合格且 $\text{ROIC}_{\text{eff}} \ge R_{\text{req}} + 2\%$ 时分段赋予（$0 \sim 0.80$）；**金融须超越权益资本成本 $K_{e,\text{fin}}$（银行 $9.0\%$ / 非银 $9.5\%$）且上限 $\eta_{\max}=0.25$**；不达标强制归零 |
+| 留存再投资转化率 | $\eta$ | `reinvestment_efficiency_eta` | — | 非金融当现金合格且 $\text{ROIC}_{\text{eff}} \ge R_{\text{req}} + 2\%$ 时分段赋予（$0 \sim 0.80$）；**金融须超越权益资本成本底线 $K_{e,\text{fin}}$（银行 $7.5\%$ / 非银 $6.5\%$，$\eta_{\max}=0.25$）**；不达标强制归零 |
 | 直接分配穿透回报率 | $R_{\text{dist}}$ | `direct_distribution_return` | — | $\frac{NP_{\text{base}} \times \alpha \times p_{\text{dist}}}{\text{MarketCap}}$ |
 | 留存复利穿透回报率 | $R_{\text{retain}}$ | `retained_compounding_return` | — | 非金融：$\frac{NP_{\text{base}} \times \alpha \times (1 - p_{\text{dist}})_+ \times \eta}{\text{MarketCap}}$；**金融（破净折价约束）：分母取 $\max(\text{MarketCap}, \text{BookEquity})$** |
 | 广义主穿透回报率 | $R_{\text{LT}}$ | `look_through_return_R_LT` | `R_star` (v3模式) | $R_{\text{dist}} + R_{\text{retain}}$ |
@@ -61,9 +61,9 @@
 2. 留存再投资转化率 η ∈ [0, η_max] 与金融权益成本校准：
    - 互联网/消费/制造业（ROIC_eff ≥ R_req + 2%）：η = min(0.80, 0.80 × (ROIC_eff − R_req) / 15%)
    - 公用事业/基础设施（ROIC_eff ≥ R_req + 2%）：η = min(0.55, 0.55 × (ROIC_eff − R_req) / 12%)
-   - 商业银行（Ke_fin = max(9.0%, R_req + 2%)）：η = min(0.25, 0.25 × max(0, ROE − Ke_fin) / 5%)
-   - 非银金融（Ke_fin = max(9.5%, R_req + 2%)）：η = min(0.25, 0.25 × max(0, ROE_norm − Ke_fin) / 5%)
-   - 金融板块高杠杆监管成本 + 破净折价保护：当 ROE ≤ Ke_fin 时 η=0（留存仅补足核心资本/偿付能力平价）；且金融计算留存项分母取 max(市值, 归母净资产)，防止 PB<1 时按 1/PB 虚增留存收益。
+   - 商业银行（Ke_fin = max(7.5%, R_req + 2%)）：η = min(0.25, 0.25 × max(0, ROE − Ke_fin) / 6.5%)
+   - 非银金融（Ke_fin = max(6.5%, R_req + 2%)）：η = min(0.25, 0.25 × max(0, ROE_norm − Ke_fin) / 6.5%)
+   - 金融板块杠杆监管成本 + 破净折价保护 + 并购首年全期年化：当 ROE ≤ Ke_fin 时 η=0；计算留存项分母取 max(市值, 归母净资产)，防止 PB<1 时按 1/PB 虚增；若当期发生重大吸收合并/扩表跃迁，按加权净资产口径将首年利润年化至全期并表基数。
    - 含金量不合格 / 未过门槛：η 强制归零（铁血防守，自动退化回纯分红收息公式）
 
 3. 广义穿透回报率与安全边际：

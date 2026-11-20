@@ -62,15 +62,15 @@ _ETA_SPREAD_SCALE = {
     'internet_tech': 0.15,
     'consumer': 0.15,
     'manufacturing': 0.15,
-    'bank': 0.05,
-    'non_bank_fin': 0.05,
+    'bank': 0.065,
+    'non_bank_fin': 0.065,
     'utility_infra': 0.12,
 }
 
-# 金融板块高杠杆权益资本成本门槛 K_{e,fin}（低于此门槛的留存利润仅补充监管资本，不计超额复利溢价）
+# 金融板块基础权益资本成本门槛 K_{e,fin}（已叠加 η_max=0.25 扣除 75% 监管维持资本与 PB<1 折价，此处设定合理连续起算底线避免双重扣减）
 _FIN_KE_HURDLE = {
-    'bank': 0.090,
-    'non_bank_fin': 0.095,
+    'bank': 0.075,
+    'non_bank_fin': 0.065,
 }
 
 
@@ -156,6 +156,154 @@ def _finite_num(val) -> float | None:
         return None
 
 
+def _detect_ma_scale_jump(
+    cfg: dict,
+    *,
+    C: float,
+    aa: float,
+    aa_all: float | None,
+    book_eq: float | None,
+    is_fin: bool,
+) -> dict:
+    """识别吸收合并或重大外源扩表引发的历史基数不可比问题，将历史盈利/结余按体量倍率折算为同口径备考基准。"""
+    base_aa_all = aa_all if aa_all is not None else aa
+    no_adj = {
+        'detected': False,
+        'method': 'none',
+        'scale_all': 1.0,
+        'scale_2y': 1.0,
+        'f_full_year': 1.0,
+        'c_full_year_pro_forma': C,
+        'aa_all_pro_forma': base_aa_all,
+        'aa_2y_pro_forma': aa,
+        'note': '',
+    }
+    if cfg.get('ma_restructuring') is False:
+        return no_adj
+
+    explicit_scale = _finite_num(cfg.get('ma_scale_factor'))
+    if explicit_scale is not None and explicit_scale > 1.05:
+        s_all = min(3.0, explicit_scale)
+        s_2y = min(3.0, (1.0 + s_all) / 2.0) if (aa is not None and C > 0 and aa < 0.90 * C) else 1.0
+        return {
+            'detected': True,
+            'method': 'explicit_factor',
+            'scale_all': s_all,
+            'scale_2y': s_2y,
+            'f_full_year': 1.0,
+            'c_full_year_pro_forma': C,
+            'aa_all_pro_forma': (base_aa_all * s_all) if base_aa_all is not None else None,
+            'aa_2y_pro_forma': aa * s_2y if aa is not None else aa,
+            'note': f'显式并购扩表倍率 {s_all:.2f}x（同步还原 5Y/2Y 备考基准）',
+        }
+
+    def _valid_seq(val) -> list[float]:
+        if not isinstance(val, (list, tuple)):
+            return []
+        res = []
+        for x in val:
+            fx = _finite_num(x)
+            if fx is None:
+                return []
+            res.append(fx)
+        return res
+
+    eq_seq = _valid_seq(cfg.get('book_equity_series'))
+    sh_seq = _valid_seq(cfg.get('shares_series'))
+    np_seq = _valid_seq(cfg.get('net_profit_series'))
+    rev_seq = _valid_seq(cfg.get('revenue_series'))
+    gw = _finite_num(cfg.get('goodwill')) or 0.0
+
+    # 路径 A：优先基于资产负债表净资产 / 股本序列检测外源并购扩表跃迁（最新年份在前）
+    if len(eq_seq) >= 3 and all(e > 0 for e in eq_seq):
+        n_years = len(eq_seq)
+        jump_idx: int | None = None
+        for idx in range(1, n_years):
+            e_curr, e_prev = eq_seq[idx - 1], eq_seq[idx]
+            ratio_e = e_curr / e_prev if e_prev > 0 else 1.0
+            delta_e = e_curr - e_prev
+            np_curr = np_seq[idx - 1] if (len(np_seq) == n_years) else (C if idx == 1 else 0.0)
+            beyond_organic = (np_curr <= 0 and delta_e > 0) or (delta_e > 1.35 * max(0.0, np_curr))
+            ratio_s = (sh_seq[idx - 1] / sh_seq[idx]) if (len(sh_seq) == n_years and sh_seq[idx] > 0) else 1.0
+            if (ratio_e >= 1.30 and beyond_organic) or (ratio_e >= 1.25 and ratio_s >= 1.20):
+                jump_idx = idx
+                break
+        if jump_idx is not None:
+            e_anchor = eq_seq[jump_idx - 1]
+            # 并购首年（jump_idx==1）利润为年中并表流量而期末净资产/市值为 100% 存量：按加权净资产口径年化至全期并表盈利基数
+            e_weighted = 0.75 * eq_seq[0] + 0.25 * eq_seq[1]
+            f_full_year = min(1.25, max(1.0, eq_seq[0] / e_weighted)) if (jump_idx == 1 and e_weighted > 0) else 1.0
+            c_pf = C * f_full_year if (jump_idx == 1 and C > 0) else C
+            factors = [
+                max(1.0, min(3.0, e_anchor / eq_seq[t])) if t >= jump_idx else f_full_year
+                for t in range(n_years)
+            ]
+            scale_all = sum(factors) / len(factors)
+            scale_2y = (factors[0] + factors[1]) / 2.0
+            if is_fin and len(np_seq) == n_years:
+                scaled_nps = [np_seq[t] * factors[t] for t in range(n_years)]
+                aa_all_pf = sum(scaled_nps) / len(scaled_nps)
+                aa_2y_pf = (scaled_nps[0] + scaled_nps[1]) / 2.0
+            else:
+                aa_all_pf = (base_aa_all * scale_all) if base_aa_all is not None else None
+                aa_2y_pf = aa * scale_2y if (aa is not None and jump_idx == 1) else aa
+            fy_txt = f'；首年全期年化 {f_full_year:.2f}x → NP_pf={c_pf:.2f}' if f_full_year > 1.0 else ''
+            return {
+                'detected': True,
+                'method': 'balance_sheet_jump',
+                'scale_all': scale_all,
+                'scale_2y': scale_2y,
+                'f_full_year': f_full_year,
+                'c_full_year_pro_forma': c_pf,
+                'aa_all_pro_forma': aa_all_pf,
+                'aa_2y_pro_forma': aa_2y_pf,
+                'note': (
+                    f'并购/外源扩表跃迁（期{jump_idx-1}/期{jump_idx}净资产 {eq_seq[jump_idx-1]/eq_seq[jump_idx]:.2f}x）'
+                    f'{fy_txt}；5Y 备考均值 {aa_all_pf:.2f}（均倍 {scale_all:.2f}x）'
+                    if aa_all_pf is not None else f'并购/外源扩表跃迁{fy_txt}'
+                ),
+            }
+
+    # 路径 B：缺省净资产序列时，用营收同步阶跃 + 并购/规模ROE佐证回退检测
+    if len(rev_seq) >= 3 and rev_seq[0] > 0 and rev_seq[1] > 0:
+        prior_revs = [r for r in rev_seq[1:] if r > 0]
+        if len(prior_revs) >= 2:
+            r_ratio_1 = rev_seq[0] / rev_seq[1]
+            r_prior_mean = sum(prior_revs) / len(prior_revs)
+            r_ratio_prior = rev_seq[0] / r_prior_mean
+            prior_stable = (max(prior_revs) / min(prior_revs)) < 1.45
+            fin_scale_roe = is_fin and (book_eq is not None and book_eq > 0 and C > 0 and (C / book_eq) <= 0.12)
+            corroborated = (gw > 0) or (cfg.get('ma_restructuring') is True) or fin_scale_roe
+            if r_ratio_1 >= 1.40 and r_ratio_prior >= 1.40 and prior_stable and corroborated:
+                r_weighted = 0.75 * rev_seq[0] + 0.25 * rev_seq[1]
+                f_full_year = min(1.25, max(1.0, rev_seq[0] / r_weighted)) if r_weighted > 0 else 1.0
+                c_pf = C * f_full_year if C > 0 else C
+                r_0_fy = rev_seq[0] * f_full_year
+                r_all_mean = sum(rev_seq) / len(rev_seq)
+                scale_all = max(1.0, min(3.0, r_0_fy / r_all_mean))
+                r_2y_mean = (rev_seq[0] + rev_seq[1]) / 2.0
+                scale_2y = max(1.0, min(3.0, r_0_fy / r_2y_mean))
+                aa_all_pf = (base_aa_all * scale_all) if base_aa_all is not None else None
+                aa_2y_pf = (aa * scale_2y) if (aa is not None and c_pf > 0 and aa < 0.90 * c_pf) else aa
+                return {
+                    'detected': True,
+                    'method': 'revenue_step_fallback',
+                    'scale_all': scale_all,
+                    'scale_2y': scale_2y,
+                    'f_full_year': f_full_year,
+                    'c_full_year_pro_forma': c_pf,
+                    'aa_all_pro_forma': aa_all_pf,
+                    'aa_2y_pro_forma': aa_2y_pf,
+                    'note': (
+                        f'并购级营收阶跃（当期/上年={r_ratio_1:.2f}x；首年全期年化 {f_full_year:.2f}x → NP_pf={c_pf:.2f}），'
+                        f'5Y 备考均值 {aa_all_pf:.2f}（{scale_all:.2f}x）'
+                        if aa_all_pf is not None else f'并购级营收阶跃（首年全期年化 {f_full_year:.2f}x）'
+                    ),
+                }
+
+    return no_adj
+
+
 def _compute_look_through_v3(
     cfg: dict,
     *,
@@ -179,6 +327,12 @@ def _compute_look_through_v3(
     is_fin = archetype in ('bank', 'non_bank_fin')
     aa_all = _finite_num(cfg.get('aa_all'))
     fe_int = _finite_num(cfg.get('fe_interest_expense')) or 0.0
+    book_eq = _finite_num(cfg.get('book_equity'))
+    ma_info = _detect_ma_scale_jump(cfg, C=C, aa=aa, aa_all=aa_all, book_eq=book_eq, is_fin=is_fin)
+    aa_eff = ma_info['aa_2y_pro_forma'] if ma_info['detected'] else aa
+    aa_all_eff = ma_info['aa_all_pro_forma'] if ma_info['detected'] else aa_all
+    if ma_info['detected'] and ma_info['note'] and ma_info['note'] not in warnings:
+        warnings.append(ma_info['note'])
 
     # 1) 维持性资本开支系数 γ_maint 与维持性资本开支 Capex_maint
     explicit_gamma = _finite_num(cfg.get('gamma_maint') if cfg.get('gamma_maint') is not None else cfg.get('maint_capex_factor'))
@@ -193,12 +347,20 @@ def _compute_look_through_v3(
         gamma_maint = 0.0
     capex_maint = D * gamma_maint
 
-    # 2) 常态化盈利基数 NP_base（非银金融按近5年均值防周期顶点高估）
-    np_base = C
-    np_normalized_note = '当期归母净利润 NP'
-    if archetype == 'non_bank_fin' and aa_all is not None and aa_all > 0 and C > 1.25 * aa_all:
-        np_base = 1.25 * aa_all
+    # 2) 常态化盈利基数 NP_base（非银金融按近5年均值防周期顶点高估；并购首年采用全期并表年化盈利基数并与同口径备考均值对齐）
+    c_eff = ma_info['c_full_year_pro_forma'] if ma_info['detected'] else C
+    np_base = c_eff
+    np_normalized_note = (
+        f'并购首年全期年化备考归母净利 NP_pf={c_eff:.2f}（并表年化 {ma_info["f_full_year"]:.2f}x）'
+        if ma_info['detected'] and ma_info['f_full_year'] > 1.0 else '当期归母净利润 NP'
+    )
+    if archetype == 'non_bank_fin' and aa_all_eff is not None and aa_all_eff > 0 and c_eff > 1.25 * aa_all_eff:
+        np_base = 1.25 * aa_all_eff
         np_normalized_note = f'非银周期平滑基数 min(NP, 1.25×5Y均值)={np_base:.2f}（抑制周期高点虚高）'
+    elif archetype == 'non_bank_fin' and ma_info['detected'] and aa_all is not None and c_eff > 1.25 * aa_all:
+        np_normalized_note = (
+            f'并购/扩表同口径备考校准：全期NP={np_base:.2f}，5Y备考均值={aa_all_eff:.2f}（1.25×上限={1.25*aa_all_eff:.2f}），未触发误砍'
+        )
     oe_v3 = np_base + D - capex_maint
 
     # 3) 维持性现金底座 OE_cash（剥离扩张性 Capex 错杀；金融按监管可分配利润稳态底座）
@@ -206,12 +368,14 @@ def _compute_look_through_v3(
     explicit_ocf = _finite_num(cfg.get('ocf_latest') if cfg.get('ocf_latest') is not None else cfg.get('ocf'))
     if is_fin:
         if archetype == 'bank':
-            oe_cash = min(np_base, aa) if aa is not None else np_base
+            oe_cash = min(np_base, aa_eff) if aa_eff is not None else np_base
             oe_cash_basis = '商业银行监管稳态可分配盈余 min(NP, 2Y均值)'
         else:
-            anchor_aa = max(aa, aa_all) if aa_all is not None else aa
+            anchor_aa = max(aa_eff, aa_all_eff) if aa_all_eff is not None else aa_eff
             oe_cash = min(np_base, anchor_aa) if anchor_aa is not None else np_base
             oe_cash_basis = '非银金融周期平滑稳态盈余 min(NP_norm, 稳态均值)'
+            if ma_info['detected']:
+                oe_cash_basis += '（含并购同口径备考校准）'
         ocf_after_int = None
     else:
         if explicit_ocf_after_int is not None:
@@ -222,8 +386,10 @@ def _compute_look_through_v3(
             oe_cash_basis = '实测经营现金流 OCF_latest − 费用化利息 − 维持性 Capex'
         else:
             # 由 aa_2y = mean(OCF - D * G_total) 无偏还原近2年均 OCF
-            ocf_after_int = aa + D * G_total - fe_int
+            ocf_after_int = aa_eff + D * G_total - fe_int
             oe_cash_basis = '由历史结余还原2Y均OCF − 维持性 Capex（剥离扩张性 Capex）'
+            if ma_info['detected'] and aa_eff != aa:
+                oe_cash_basis += '（并购备考体量对齐）'
         oe_cash = ocf_after_int - capex_maint
 
     # 4) 广义股东分配率 p_dist（现金分红率 p_div + 注销式回购率 p_buyback）
@@ -251,7 +417,6 @@ def _compute_look_through_v3(
     # 6) 有效投入资本回报率 ROIC_eff 与留存转化率 η
     roic_explicit = _finite_num(cfg.get('roic'))
     roe_explicit = _finite_num(cfg.get('roe') if cfg.get('roe') is not None else cfg.get('roe_latest'))
-    book_eq = _finite_num(cfg.get('book_equity'))
     roic_basis = ''
     roic_eff: float | None = None
     if is_fin:
@@ -345,6 +510,11 @@ def _compute_look_through_v3(
         'industry_archetype_label': archetype_cn,
         'np_base': np_base,
         'np_normalized_note': np_normalized_note,
+        'ma_scale_adjusted': ma_info['detected'],
+        'ma_scale_note': ma_info['note'],
+        'ma_full_year_factor': ma_info['f_full_year'],
+        'aa_all_pro_forma': aa_all_eff,
+        'aa_2y_pro_forma': aa_eff,
         'total_capex_factor_G': G_total,
         'maint_capex_factor_gamma': gamma_maint,
         'maint_capex_amount': capex_maint,
